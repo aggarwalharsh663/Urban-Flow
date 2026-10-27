@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+yolov8n.pt
+yolov8s.pt
+yolov8m.pt
+uploads/*
+!uploads/.gitkeep
+reports/*
+!reports/.gitkeep

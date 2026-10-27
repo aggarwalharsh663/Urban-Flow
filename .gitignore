@@ -1,0 +1,31 @@
+# Environments & runtimes
+backend/python/
+backend/.venv/
+frontend/node_modules/
+frontend/dist/
+
+# Large binaries & model weights
+backend/yolov8m.pt
+backend/yolov8s.pt
+*.exe
+*.zip
+*.log
+backend/backend.log
+
+# Uploads & reports
+backend/uploads/*
+!backend/uploads/.gitkeep
+backend/reports/*
+!backend/reports/.gitkeep
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
