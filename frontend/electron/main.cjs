@@ -4,11 +4,17 @@ const fs = require('fs');
 const http = require('http');
 const { spawn, exec } = require('child_process');
 
+// Enforce single running instance of Urban Flow
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  app.quit();
+  process.exit(0);
+}
+
 let mainWindow = null;
 let splashWindow = null;
 let backendProcess = null;
 let frontendServer = null;
-let frontendProcess = null;
 let isQuitting = false;
 
 const BACKEND_PORT = 8000;
@@ -152,22 +158,27 @@ function createSplash() {
   splashWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(splashHtml));
 }
 
-function checkServerReady(url, timeoutMs = 25000, intervalMs = 400) {
+function checkServerReady(url, timeoutMs = 25000, intervalMs = 300) {
   const startTime = Date.now();
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
+    let done = false;
     const timer = setInterval(() => {
+      if (Date.now() - startTime > timeoutMs) {
+        clearInterval(timer);
+        if (!done) {
+          done = true;
+          resolve(false);
+        }
+        return;
+      }
       const req = http.get(url, (res) => {
-        if (res.statusCode < 500) {
+        if (!done && res.statusCode < 500) {
+          done = true;
           clearInterval(timer);
           resolve(true);
         }
       });
-      req.on('error', () => {
-        if (Date.now() - startTime > timeoutMs) {
-          clearInterval(timer);
-          reject(new Error(`Timed out waiting for server at ${url}`));
-        }
-      });
+      req.on('error', () => {});
       req.setTimeout(800, () => req.destroy());
     }, intervalMs);
   });
@@ -182,7 +193,13 @@ function startBackend() {
       console.log('[UrbanFlow Desktop] Launching background Python backend on port 8000...');
       try {
         const logPath = path.join(BACKEND_DIR, 'backend.log');
-        const logFd = fs.openSync(logPath, 'w');
+        let stdioOption = 'ignore';
+        try {
+          const logFd = fs.openSync(logPath, 'a');
+          stdioOption = ['ignore', logFd, logFd];
+        } catch (e) {
+          stdioOption = 'ignore';
+        }
 
         backendProcess = spawn(
           PYTHON_EXE,
@@ -191,7 +208,7 @@ function startBackend() {
             cwd: BACKEND_DIR,
             windowsHide: true,
             shell: false,
-            stdio: ['ignore', logFd, logFd]
+            stdio: stdioOption
           }
         );
 
@@ -202,20 +219,15 @@ function startBackend() {
         console.error('[UrbanFlow Desktop] Spawn error for backend:', err);
       }
 
-      checkServerReady(BACKEND_URL + '/api/health', 25000)
-        .then(() => {
-          console.log('[UrbanFlow Desktop] Backend is ready and responding.');
-          resolve();
-        })
-        .catch((err) => {
-          console.warn('[UrbanFlow Desktop] Backend startup check warning:', err.message);
-          resolve();
-        });
+      checkServerReady(BACKEND_URL + '/api/health', 25000).then(() => {
+        console.log('[UrbanFlow Desktop] Backend is ready.');
+        resolve();
+      });
     };
 
     const probe = http.get(BACKEND_URL + '/api/health', (res) => {
       if (res.statusCode === 200) {
-        console.log('[UrbanFlow Desktop] Backend is already running on port 8000.');
+        console.log('[UrbanFlow Desktop] Backend already active on port 8000.');
         return resolve();
       }
       launch();
@@ -245,32 +257,18 @@ const mimeTypes = {
   '.mp4': 'video/mp4',
 };
 
-async function startFrontend() {
+function startFrontend() {
   const clientDir = path.join(FRONTEND_DIR, 'dist', 'client');
   const indexHtmlPath = path.join(clientDir, 'index.html');
-  const serverPath = path.join(FRONTEND_DIR, 'dist', 'server', 'server.js');
-
-  console.log('[UrbanFlow Desktop] Starting frontend server on port', FRONTEND_PORT);
-  let ssrHandler = null;
-  if (fs.existsSync(serverPath)) {
-    try {
-      const { pathToFileURL } = require('url');
-      const fileUrl = pathToFileURL(serverPath).href;
-      const serverModule = await import(fileUrl);
-      ssrHandler = serverModule.default ?? serverModule;
-    } catch (err) {
-      console.warn('[UrbanFlow Desktop] SSR module import warning:', err.message);
-    }
-  }
 
   return new Promise((resolve) => {
-    frontendServer = http.createServer(async (req, res) => {
+    frontendServer = http.createServer((req, res) => {
       try {
         const parsedUrl = new URL(req.url, FRONTEND_URL);
         const pathname = parsedUrl.pathname;
 
-        // 1. Static asset lookup
-        if (pathname !== '/') {
+        // 1. Static file in dist/client
+        if (pathname !== '/' && pathname !== '') {
           const filePath = path.join(clientDir, pathname);
           if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
             const ext = path.extname(filePath).toLowerCase();
@@ -284,25 +282,7 @@ async function startFrontend() {
           }
         }
 
-        // 2. SSR render
-        if (ssrHandler && typeof ssrHandler.fetch === 'function') {
-          try {
-            const fullUrl = `http://127.0.0.1:${FRONTEND_PORT}${req.url}`;
-            const webReq = new Request(fullUrl, {
-              method: req.method,
-              headers: req.headers,
-            });
-            const webRes = await ssrHandler.fetch(webReq);
-            res.writeHead(webRes.status, Object.fromEntries(webRes.headers.entries()));
-            const body = await webRes.text();
-            res.end(body);
-            return;
-          } catch (ssrErr) {
-            console.warn('[UrbanFlow Desktop] SSR fallback triggered:', ssrErr.message);
-          }
-        }
-
-        // 3. SPA Fallback (index.html)
+        // 2. Serve index.html (SPA entry)
         if (fs.existsSync(indexHtmlPath)) {
           res.writeHead(200, {
             'Content-Type': 'text/html; charset=utf-8',
@@ -315,7 +295,7 @@ async function startFrontend() {
         res.writeHead(404);
         res.end('Not Found');
       } catch (err) {
-        console.error('[UrbanFlow Desktop] Request handler error:', err);
+        console.error('[UrbanFlow Desktop] Frontend request error:', err);
         res.writeHead(500);
         res.end('Internal Server Error: ' + err.message);
       }
@@ -323,7 +303,7 @@ async function startFrontend() {
 
     frontendServer.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
-        console.log('[UrbanFlow Desktop] Port 5174 already in use, frontend is ready.');
+        console.log('[UrbanFlow Desktop] Port 5174 already in use, assuming active.');
         resolve();
       } else {
         console.error('[UrbanFlow Desktop] Frontend server error:', err);
@@ -358,33 +338,29 @@ function createWindow() {
 
   mainWindow.loadURL(FRONTEND_URL);
 
-  mainWindow.once('ready-to-show', () => {
+  const showMainWindow = () => {
     if (splashWindow && !splashWindow.isDestroyed()) {
       splashWindow.close();
       splashWindow = null;
     }
-    mainWindow.show();
-    mainWindow.focus();
-  });
-
-  setTimeout(() => {
-    if (splashWindow && !splashWindow.isDestroyed()) {
-      splashWindow.close();
-      splashWindow = null;
-    }
-    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show();
       mainWindow.focus();
     }
-  }, 6000);
+  };
+
+  mainWindow.once('ready-to-show', showMainWindow);
+
+  // Safety fallback: reveal window after 3.5 seconds maximum
+  setTimeout(showMainWindow, 3500);
 
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
-    console.warn(`[UrbanFlow Desktop] Page failed to load (${errorCode}: ${errorDescription}), retrying in 1.5s...`);
+    console.warn(`[UrbanFlow Desktop] Page failed to load (${errorCode}: ${errorDescription}), retrying in 1s...`);
     setTimeout(() => {
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.loadURL(FRONTEND_URL);
       }
-    }, 1500);
+    }, 1000);
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -414,16 +390,15 @@ function cleanupProcesses() {
     }
     backendProcess = null;
   }
-
-  if (frontendProcess && frontendProcess.pid) {
-    if (process.platform === 'win32') {
-      exec(`taskkill /pid ${frontendProcess.pid} /T /F`, () => {});
-    } else {
-      frontendProcess.kill('SIGTERM');
-    }
-    frontendProcess = null;
-  }
 }
+
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
 
 app.whenReady().then(async () => {
   createSplash();
@@ -432,11 +407,10 @@ app.whenReady().then(async () => {
       startBackend(),
       startFrontend()
     ]);
-    createWindow();
   } catch (err) {
     console.error('[UrbanFlow Desktop] Startup error:', err);
-    dialog.showErrorBox('Urban Flow Error', `Failed to start desktop application:\n${err.message}`);
   }
+  createWindow();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

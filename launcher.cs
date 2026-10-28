@@ -16,28 +16,37 @@ namespace UrbanFlowLauncher
                 string frontendDir = Path.Combine(appDir, "frontend");
                 string electronExe = Path.Combine(frontendDir, "node_modules", "electron", "dist", "electron.exe");
 
+                if (!File.Exists(electronExe))
+                {
+                    MessageBox.Show(
+                        "Urban Flow application files are incomplete.\n\n" +
+                        "Missing: " + electronExe + "\n\n" +
+                        "Please run 'Urban Flow Setup.exe' again to install all required components.",
+                        "Urban Flow - Missing Component",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning
+                    );
+                    return;
+                }
+
                 ProcessStartInfo psi = new ProcessStartInfo();
-                if (File.Exists(electronExe))
-                {
-                    psi.FileName = electronExe;
-                    psi.Arguments = ".";
-                    psi.WorkingDirectory = frontendDir;
-                }
-                else
-                {
-                    psi.FileName = "cmd.exe";
-                    psi.Arguments = "/c npm run app";
-                    psi.WorkingDirectory = frontendDir;
-                }
-                psi.WindowStyle = ProcessWindowStyle.Hidden;
-                psi.CreateNoWindow = true;
-                psi.UseShellExecute = false;
+                psi.FileName = electronExe;
+                psi.Arguments = "\"" + frontendDir + "\"";
+                psi.WorkingDirectory = frontendDir;
+                psi.WindowStyle = ProcessWindowStyle.Normal;
+                psi.CreateNoWindow = false;
+                psi.UseShellExecute = true;
 
                 Process.Start(psi);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Failed to launch Urban Flow:\n" + ex.Message, "Urban Flow Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(
+                    "Unable to launch Urban Flow:\n\n" + ex.Message,
+                    "Urban Flow Launch Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error
+                );
             }
         }
     }
