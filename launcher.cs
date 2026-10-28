@@ -31,11 +31,11 @@ namespace UrbanFlowLauncher
 
                 ProcessStartInfo psi = new ProcessStartInfo();
                 psi.FileName = electronExe;
-                psi.Arguments = "\"" + frontendDir + "\"";
+                psi.Arguments = ".";
                 psi.WorkingDirectory = frontendDir;
                 psi.WindowStyle = ProcessWindowStyle.Normal;
                 psi.CreateNoWindow = false;
-                psi.UseShellExecute = true;
+                psi.UseShellExecute = false;
 
                 Process.Start(psi);
             }

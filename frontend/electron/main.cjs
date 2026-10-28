@@ -4,12 +4,6 @@ const fs = require('fs');
 const http = require('http');
 const { spawn, exec } = require('child_process');
 
-// Enforce single running instance of Urban Flow
-const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock) {
-  app.quit();
-  process.exit(0);
-}
 
 let mainWindow = null;
 let splashWindow = null;
@@ -203,12 +197,13 @@ function startBackend() {
 
         backendProcess = spawn(
           PYTHON_EXE,
-          ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT)],
+          ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT), '--app-dir', BACKEND_DIR],
           {
             cwd: BACKEND_DIR,
             windowsHide: true,
             shell: false,
-            stdio: stdioOption
+            stdio: stdioOption,
+            env: Object.assign({}, process.env, { PYTHONPATH: BACKEND_DIR })
           }
         );
 
@@ -391,14 +386,6 @@ function cleanupProcesses() {
     backendProcess = null;
   }
 }
-
-app.on('second-instance', () => {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
-  }
-});
 
 app.whenReady().then(async () => {
   createSplash();
