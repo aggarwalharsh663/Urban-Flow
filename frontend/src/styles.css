@@ -125,10 +125,12 @@ h1,h2,h3,p{margin-top:0}
 .traffic-status.moderate,.traffic-status.medium{background:var(--signal);color:var(--signal-ink)}
 .traffic-status.light,.traffic-status.low,.traffic-status.clear{background:var(--go);color:oklch(0.98 0 0)}
 .direction-name{font:800 30px var(--font-display);text-transform:uppercase;letter-spacing:-.03em;margin:18px 0 10px}
-.direction-metrics{display:flex;align-items:center;gap:16px}
+.direction-metrics{display:flex;align-items:center;gap:10px}
 .direction-metrics div{display:flex;flex-direction:column}
-.direction-metrics strong{font:700 34px/1 var(--font-mono)}.direction-metrics strong small{font-size:16px}
-.direction-metrics span{font:500 11px var(--font-mono);color:var(--ink-soft);text-transform:uppercase;margin-top:4px}
+.direction-metrics strong{font:700 26px/1 var(--font-mono)}.direction-metrics strong small{font-size:13px}
+.direction-metrics span{font:500 10px var(--font-mono);color:var(--ink-soft);text-transform:uppercase;margin-top:4px}
+.direction-submetrics{display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding:6px 10px;background:var(--paper-2);border:2px solid var(--rule);font:600 11px var(--font-mono);color:var(--ink-soft)}
+.direction-submetrics b{color:var(--ink)}
 .metric-divider{width:2px;align-self:stretch;background:var(--rule)}
 .card-bar{height:12px;margin-top:18px;border:2px solid var(--rule);background:var(--paper-2)}
 .card-bar i{display:block;height:100%;background:repeating-linear-gradient(-45deg,var(--direction) 0 6px,var(--ink) 6px 8px);transition:width .5s}
@@ -189,7 +191,7 @@ h1,h2,h3,p{margin-top:0}
 .result-card-heading p{margin:4px 0 0;font-size:13px;color:var(--ink-soft)}
 .chart-legend{display:flex;gap:14px;font:500 11px var(--font-mono)}.chart-legend span{display:flex;gap:6px;align-items:center}
 .chart-legend i{width:12px;height:12px;border:2px solid var(--rule)}
-.legend-vehicles{background:var(--signal)}.legend-green{background:var(--ink-soft)}
+.legend-vehicles{background:var(--signal)}.legend-green{background:var(--go)}.legend-red{background:var(--stop)}
 .chart-area{height:280px}
 .chart-loading{height:100%;display:flex;gap:8px;align-items:center;justify-content:center;font:500 12px var(--font-mono)}
 .result-counts{display:grid;grid-template-columns:repeat(4,1fr);border-top:3px solid var(--rule);margin-top:16px}

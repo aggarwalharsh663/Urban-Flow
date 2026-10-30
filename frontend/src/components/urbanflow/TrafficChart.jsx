@@ -37,7 +37,7 @@ export default function TrafficChart({ data, colors }) {
           }}
           cursor={{ fill: "rgba(255,255,255,.03)" }}
         />
-        <Bar dataKey="vehicles" name="Vehicles" radius={0} maxBarSize={24}>
+        <Bar dataKey="vehicles" name="Vehicles" radius={0} maxBarSize={20}>
           {data.map((entry) => (
             <Cell
               key={entry.direction}
@@ -47,7 +47,8 @@ export default function TrafficChart({ data, colors }) {
             />
           ))}
         </Bar>
-        <Bar dataKey="green" name="Green seconds" fill="var(--ink-soft)" radius={0} maxBarSize={24} />
+        <Bar dataKey="green" name="Green seconds" fill="var(--go)" radius={0} maxBarSize={20} />
+        <Bar dataKey="red" name="Red seconds" fill="var(--stop)" radius={0} maxBarSize={20} />
       </BarChart>
     </ResponsiveContainer>
   );

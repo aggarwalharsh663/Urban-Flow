@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 DIRECTIONS = ("North", "South", "East", "West")
 DEFAULT_GREEN_BUDGET = 120
 DEFAULT_YELLOW_SECONDS = 3
-DEFAULT_ALL_RED_SECONDS = 2
+DEFAULT_ALL_RED_SECONDS = 0
 
 
 def calculate_green_times(
@@ -93,7 +93,16 @@ def create_signal_plan(
     green_times = calculate_green_times(counts, green_budget=green_budget)
     busiest = max(DIRECTIONS, key=lambda direction: (counts[direction], -DIRECTIONS.index(direction)))
     total_green = sum(green_times.values())
-    total_full_cycle = total_green + len(DIRECTIONS) * (yellow_seconds + all_red_seconds)
+    total_full_cycle = total_green  # Full cycle matches the configured cycle budget (e.g. 120s, not 140s)
+
+    red_times = {
+        direction: max(0, total_full_cycle - green_times[direction] - yellow_seconds)
+        for direction in DIRECTIONS
+    }
+    red_yellow_times = {
+        direction: max(0, total_full_cycle - green_times[direction])
+        for direction in DIRECTIONS
+    }
 
     return {
         "report_id": uuid.uuid4().hex,
@@ -104,18 +113,24 @@ def create_signal_plan(
         "total_vehicle_count": sum(counts.values()),
         "model_detection_count": detection_count,
         "green_times": green_times,
+        "red_times": red_times,
+        "red_yellow_times": red_yellow_times,
+        "yellow_seconds": yellow_seconds,
         "status": {
             direction: "Low" if counts[direction] < 5 else "Medium" if counts[direction] < 15 else "High"
             for direction in DIRECTIONS
         },
         "explanation": (
             (
-                f"No vehicles were entered, so each approach received an equal {green_times[DIRECTIONS[0]]}-second green time."
+                f"No vehicles were entered, so each approach received an equal {green_times[DIRECTIONS[0]]}-second green time "
+                f"({red_times[DIRECTIONS[0]]}s red, {red_yellow_times[DIRECTIONS[0]]}s total red+yellow wait time)."
                 if source == "simulated"
-                else f"No vehicles were detected in any direction, so each approach received an equal {green_times[DIRECTIONS[0]]}-second green time."
+                else f"No vehicles were detected in any direction, so each approach received an equal {green_times[DIRECTIONS[0]]}-second green time "
+                f"({red_times[DIRECTIONS[0]]}s red, {red_yellow_times[DIRECTIONS[0]]}s total red+yellow wait time)."
             )
             if sum(counts.values()) == 0
-            else f"{busiest} received {green_times[busiest]} seconds ({round(green_times[busiest] / total_green * 100)}% of the {total_green}s green budget) "
+            else f"{busiest} received {green_times[busiest]}s green ({red_times[busiest]}s red, {red_yellow_times[busiest]}s total red+yellow wait, "
+            f"{round(green_times[busiest] / total_green * 100)}% of {total_full_cycle}s cycle) "
             f"because it had the highest detected traffic volume ({counts[busiest]} vehicles)."
         ),
         "cycle": {
@@ -129,5 +144,5 @@ def create_signal_plan(
         "detections": detections or [],
         "analysis_note": analysis_note,
         "analysis_provider": analysis_provider,
-        "safety_note": f"Configurable plan ({total_green}s green budget, {total_full_cycle}s total cycle). Timings require validation by traffic authorities.",
+        "safety_note": f"Configurable plan ({total_full_cycle}s cycle budget). Timings require validation by traffic authorities.",
     }

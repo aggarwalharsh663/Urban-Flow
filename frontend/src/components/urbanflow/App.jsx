@@ -34,6 +34,8 @@ function formatDate(value) {
 }
 
 function downloadReport(report) {
+  const y = report.yellow_seconds ?? report.cycle?.yellow_seconds_per_phase ?? 3;
+  const fullCycle = report.cycle?.estimated_full_cycle_seconds ?? report.cycle?.total_green_seconds ?? 120;
   const lines = [
     `# Adaptive Traffic Signal Plan — ${report.junction_name}`,
     "",
@@ -43,18 +45,21 @@ function downloadReport(report) {
     "",
     "## Direction summary",
     "",
-    "| Direction | Vehicles | Recommended green | Status |",
-    "|---|---:|---:|---|",
-    ...DIRECTIONS.map((direction) =>
-      `| ${direction} | ${report.counts[direction]} | ${report.green_times[direction]} sec | ${report.status[direction]} |`,
-    ),
+    "| Direction | Vehicles | Green Time | Yellow Time | Red Light | Red+Yellow Waiting | Status |",
+    "|---|---:|---:|---:|---:|---:|---|",
+    ...DIRECTIONS.map((direction) => {
+      const g = report.green_times[direction];
+      const r = report.red_times?.[direction] ?? Math.max(0, fullCycle - g - y);
+      const ry = report.red_yellow_times?.[direction] ?? Math.max(0, fullCycle - g);
+      return `| ${direction} | ${report.counts[direction]} | ${g} sec | ${y} sec | ${r} sec | ${ry} sec | ${report.status[direction]} |`;
+    }),
     "",
     "## Cycle summary",
     "",
-    `- Total green: ${report.cycle.total_green_seconds} sec`,
-    `- Yellow: ${report.cycle.yellow_seconds_per_phase} sec per phase`,
-    `- All-red clearance: ${report.cycle.all_red_seconds_per_phase} sec per phase`,
-    `- Estimated full cycle: ${report.cycle.estimated_full_cycle_seconds} sec`,
+    `- Total cycle: ${fullCycle} sec`,
+    `- Green budget: ${report.cycle.total_green_seconds} sec`,
+    `- Yellow transition: ${y} sec per phase`,
+    `- Red+Yellow clearance per approach: ${fullCycle - Math.round(report.cycle.total_green_seconds / 4)} sec average`,
     "",
     `## Why this plan?`,
     "",
@@ -101,13 +106,27 @@ function Header({ health, theme, onToggleTheme }) {
 function DirectionCard({ direction, report }) {
   const count = report?.counts?.[direction] ?? 0;
   const green = report?.green_times?.[direction] ?? 30;
+  const yellow = report?.yellow_seconds ?? report?.cycle?.yellow_seconds_per_phase ?? 3;
+  const fullCycle = report?.cycle?.estimated_full_cycle_seconds ?? report?.cycle?.total_green_seconds ?? 120;
+  const red = report?.red_times?.[direction] ?? Math.max(0, fullCycle - green - yellow);
+  const redYellow = report?.red_yellow_times?.[direction] ?? Math.max(0, fullCycle - green);
   const status = report?.status?.[direction] ?? "Awaiting data";
   return (
     <article className="direction-card" style={{ "--direction": COLORS[direction] }}>
       <div className="direction-top"><span className="direction-icon"><DirectionIcon direction={direction} /></span><span className={`traffic-status ${status.toLowerCase().replace(" ", "-")}`}>{status}</span></div>
       <div className="direction-name">{direction}</div>
-      <div className="direction-metrics"><div><strong>{count}</strong><span>vehicles</span></div><div className="metric-divider" /><div><strong>{green}<small>s</small></strong><span>green time</span></div></div>
-      <div className="card-bar"><i style={{ width: `${Math.max(4, (green / 60) * 100)}%` }} /></div>
+      <div className="direction-metrics">
+        <div><strong>{count}</strong><span>vehicles</span></div>
+        <div className="metric-divider" />
+        <div><strong style={{ color: "var(--go)" }}>{green}<small>s</small></strong><span>green</span></div>
+        <div className="metric-divider" />
+        <div><strong style={{ color: "var(--stop)" }}>{red}<small>s</small></strong><span>red</span></div>
+      </div>
+      <div className="direction-submetrics">
+        <span>Yellow: <b>{yellow}s</b></span>
+        <span>Red+Yellow: <b>{redYellow}s</b></span>
+      </div>
+      <div className="card-bar"><i style={{ width: `${Math.max(4, (green / fullCycle) * 100)}%` }} /></div>
     </article>
   );
 }
@@ -252,7 +271,7 @@ function AnalysisSection({ onReport, junctionName, greenBudget = 120, onBudgetCh
 
 const CYCLE_PRESETS = [60, 90, 120, 150, 180, 240];
 
-function CycleTimingControl({ budget, onChange, title = "Signal Cycle Green Budget", description = "Adjust green time budget from default 120s" }) {
+function CycleTimingControl({ budget, onChange, title = "Signal Cycle Budget", description = "Total cycle duration (e.g. 120s total cycle)" }) {
   const update = (val) => {
     const clamped = Math.max(40, Math.min(600, Math.round(Number(val) || 120)));
     onChange(clamped);
@@ -382,17 +401,26 @@ function calculateClientGreenTimes(counts, budget = 120) {
 function updateReportBudget(report, budget) {
   const green_times = calculateClientGreenTimes(report.counts, budget);
   const total_green = Object.values(green_times).reduce((a, b) => a + b, 0);
-  const yellow = report.cycle?.yellow_seconds_per_phase ?? 3;
-  const allRed = report.cycle?.all_red_seconds_per_phase ?? 2;
-  const fullCycle = total_green + 4 * (yellow + allRed);
+  const yellow = report.yellow_seconds ?? report.cycle?.yellow_seconds_per_phase ?? 3;
+  const allRed = 0;
+  const fullCycle = total_green; // Exact cycle budget (e.g. 120s, NOT 140s)
+  const red_times = {};
+  const red_yellow_times = {};
+  for (const d of DIRECTIONS) {
+    red_times[d] = Math.max(0, fullCycle - green_times[d] - yellow);
+    red_yellow_times[d] = Math.max(0, fullCycle - green_times[d]);
+  }
   const busiest = DIRECTIONS.reduce((maxD, d) => (report.counts[d] > (report.counts[maxD] || 0) ? d : maxD), DIRECTIONS[0]);
   const explanation = report.total_vehicle_count === 0
-    ? (report.source === "simulated" ? `No vehicles were entered, so each approach received an equal ${green_times.North}-second green time.` : `No vehicles were detected in any direction, so each approach received an equal ${green_times.North}-second green time.`)
-    : `${busiest} received ${green_times[busiest]} seconds (${Math.round((green_times[busiest] / total_green) * 100)}% of the ${total_green}s green budget) because it had the highest detected traffic volume (${report.counts[busiest]} vehicles).`;
+    ? (report.source === "simulated" ? `No vehicles were entered, so each approach received an equal ${green_times.North}-second green time (${red_times.North}s red, ${red_yellow_times.North}s red+yellow wait time).` : `No vehicles were detected in any direction, so each approach received an equal ${green_times.North}-second green time (${red_times.North}s red, ${red_yellow_times.North}s red+yellow wait time).`)
+    : `${busiest} received ${green_times[busiest]}s green (${red_times[busiest]}s red, ${red_yellow_times[busiest]}s total red+yellow wait, ${Math.round((green_times[busiest] / total_green) * 100)}% of ${fullCycle}s cycle) because it had the highest detected traffic volume (${report.counts[busiest]} vehicles).`;
 
   return {
     ...report,
     green_times,
+    red_times,
+    red_yellow_times,
+    yellow_seconds: yellow,
     explanation,
     cycle: {
       ...report.cycle,
@@ -401,6 +429,7 @@ function updateReportBudget(report, budget) {
       all_red_seconds_per_phase: allRed,
       estimated_full_cycle_seconds: fullCycle,
     },
+    safety_note: `Configurable plan (${fullCycle}s cycle budget). Timings require validation by traffic authorities.`,
   };
 }
 
@@ -512,17 +541,40 @@ function CycleAdjuster({ report, onUpdateReport }) {
 
 function Results({ report, onUpdateReport }) {
   if (!report) return <section className="section-block results-empty" id="results"><div className="empty-chart"><BarChart3 size={21} /></div><div><h3>Your signal plan will appear here</h3><p>Analyse an upload or run a simulation to generate a direction-by-direction recommendation.</p></div><span className="empty-indicator"><span />AWAITING ANALYSIS</span></section>;
-  const data = DIRECTIONS.map((direction) => ({ direction, vehicles: report.counts[direction], green: report.green_times[direction] }));
+  const y = report.yellow_seconds ?? report.cycle?.yellow_seconds_per_phase ?? 3;
+  const fullCycle = report.cycle?.estimated_full_cycle_seconds ?? report.cycle?.total_green_seconds ?? 120;
+  const data = DIRECTIONS.map((direction) => ({
+    direction,
+    vehicles: report.counts[direction],
+    green: report.green_times[direction],
+    red: report.red_times?.[direction] ?? Math.max(0, fullCycle - report.green_times[direction] - y),
+  }));
   return (
     <section className="section-block results-section" id="results">
       <div className="section-heading result-heading"><div><div className="eyebrow"><span className="eyebrow-line" />ANALYSIS REPORT <span className="report-tag">{report.source === "simulated" ? "SIMULATION" : "LOCAL DETECTION"}</span></div><h2>Signal plan <span className="result-junction">{report.junction_name}</span></h2><p className="section-subtitle"><Clock3 size={14} /> Analysed {formatDate(report.analysed_at)}</p></div><button className="button button-outline" onClick={() => downloadReport(report)}><Download size={15} />Download signal plan</button></div>
       <div className="result-grid">
         <div className="result-main">
-          <div className="result-card"><div className="result-card-heading"><div><h3>Traffic density & green time</h3><p>Vehicle volume compared with recommended seconds</p></div><div className="chart-legend"><span><i className="legend-vehicles" />Vehicles</span><span><i className="legend-green" />Green seconds</span></div></div>
+          <div className="result-card"><div className="result-card-heading"><div><h3>Traffic density & signal timings</h3><p>Vehicle volume compared with green and red light seconds</p></div><div className="chart-legend"><span><i className="legend-vehicles" />Vehicles</span><span><i className="legend-green" />Green seconds</span><span><i className="legend-red" />Red seconds</span></div></div>
             <div className="chart-area"><Suspense fallback={<div className="chart-loading"><LoaderCircle className="spin" size={17} />Loading chart…</div>}><TrafficChart data={data} colors={COLORS} /></Suspense></div>
-            <div className="result-counts">{DIRECTIONS.map((direction) => <div key={direction}><span style={{ background: COLORS[direction] }} /><b>{direction}</b><strong>{report.counts[direction]}</strong><small>vehicles</small><em>{report.green_times[direction]}s</em></div>)}</div>
+            <div className="result-counts">{DIRECTIONS.map((direction) => {
+              const g = report.green_times[direction];
+              const r = report.red_times?.[direction] ?? Math.max(0, fullCycle - g - y);
+              const ry = report.red_yellow_times?.[direction] ?? Math.max(0, fullCycle - g);
+              return (
+                <div key={direction}>
+                  <span style={{ background: COLORS[direction] }} />
+                  <b>{direction}</b>
+                  <strong>{report.counts[direction]}</strong><small>vehicles</small>
+                  <div style={{ display: "flex", gap: "6px", alignItems: "baseline", marginTop: "3px" }}>
+                    <em style={{ color: "var(--go)", fontWeight: "bold" }}>G: {g}s</em>
+                    <em style={{ color: "var(--stop)", fontWeight: "bold" }}>R: {r}s</em>
+                  </div>
+                  <small style={{ fontSize: "10px", color: "var(--ink-soft)" }}>R+Y: {ry}s</small>
+                </div>
+              );
+            })}</div>
           </div>
-          <div className="result-card cycle-card"><div className="result-card-heading"><div><h3>Cycle timing summary</h3><p>Assumptions for a demonstration plan</p></div><span className="cycle-total">{report.cycle.estimated_full_cycle_seconds}<small>s total</small></span></div><CycleAdjuster report={report} onUpdateReport={onUpdateReport} /><div className="cycle-stats"><div><span className="cycle-dot green-dot" /><small>Green budget</small><b>{report.cycle.total_green_seconds}<i>sec</i></b></div><div><span className="cycle-dot yellow-dot" /><small>Yellow / phase</small><b>{report.cycle.yellow_seconds_per_phase}<i>sec</i></b></div><div><span className="cycle-dot red-dot" /><small>All-red / phase</small><b>{report.cycle.all_red_seconds_per_phase}<i>sec</i></b></div><div><span className="cycle-dot blue-dot" /><small>Estimated full cycle</small><b>{report.cycle.estimated_full_cycle_seconds}<i>sec</i></b></div></div><p className="cycle-caveat"><Info size={14} />Yellow and all-red intervals are per-phase demo assumptions and are not included in the {report.cycle.total_green_seconds}-second green budget.</p></div>
+          <div className="result-card cycle-card"><div className="result-card-heading"><div><h3>Cycle timing summary</h3><p>Demonstration timing allocation across phases</p></div><span className="cycle-total">{fullCycle}<small>s cycle</small></span></div><CycleAdjuster report={report} onUpdateReport={onUpdateReport} /><div className="cycle-stats"><div><span className="cycle-dot blue-dot" /><small>Total cycle</small><b>{fullCycle}<i>sec</i></b></div><div><span className="cycle-dot green-dot" /><small>Green budget</small><b>{report.cycle.total_green_seconds}<i>sec</i></b></div><div><span className="cycle-dot yellow-dot" /><small>Yellow / phase</small><b>{report.cycle.yellow_seconds_per_phase}<i>sec</i></b></div><div><span className="cycle-dot red-dot" /><small>Avg Red+Yellow wait</small><b>{fullCycle - Math.round(report.cycle.total_green_seconds / 4)}<i>sec</i></b></div></div><p className="cycle-caveat"><Info size={14} />Full cycle length is exactly {fullCycle}s. When an approach has green, remaining {fullCycle - Math.round(report.cycle.total_green_seconds / 4)}s avg serves other directions (red + yellow clearance).</p></div>
         </div>
         <aside className="result-side">
           <div className="result-card media-card"><div className="result-card-heading"><div><h3>Detection preview</h3><p>Original input and locally annotated frame</p></div></div>{report.original_url && <div className="media-preview-block"><span className="media-label">ORIGINAL UPLOAD</span>{report.source === "video" ? <video src={imageUrl(report.original_url)} controls /> : <img src={imageUrl(report.original_url)} alt="Original junction upload" />}</div>}{report.annotated_url ? <div className="media-preview-block"><span className="media-label">YOLOV8 DETECTIONS</span><img src={imageUrl(report.annotated_url)} alt="Locally annotated vehicle detections" /></div> : <div className="no-media"><FileImage size={22} /><span>Simulation contains no source image.</span></div>}{report.analysis_note && <p className={`media-note ${report.total_vehicle_count === 0 && report.source !== "simulated" ? "media-note-warning" : ""}`}><Info size={13} />{report.analysis_note}</p>}{report.source !== "simulated" && <div className="detection-footer"><span><CarFront size={14} />{report.total_vehicle_count} vehicles detected</span>{report.detections?.length > 0 && <span>Mean confidence {Math.round(report.detections.reduce((sum, item) => sum + item.confidence, 0) / report.detections.length * 100)}%</span>}</div>}</div>
