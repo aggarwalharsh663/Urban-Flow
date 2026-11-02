@@ -300,7 +300,7 @@ function registerProtocolHandler() {
       }
 
       // 9. Static frontend assets from dist/client
-      if (pathname !== '/' && pathname !== '') {
+      if (pathname !== '/' && pathname !== '' && pathname !== '/index.html') {
         const filePath = path.join(CLIENT_DIR, pathname);
         if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
           const ext = path.extname(filePath).toLowerCase();
@@ -432,7 +432,7 @@ function createWindow() {
     },
   });
 
-  const appUrl = 'app://urbanflow/index.html';
+  const appUrl = 'app://urbanflow/';
   log('Loading portless URL into mainWindow:', appUrl);
   mainWindow.loadURL(appUrl);
 
