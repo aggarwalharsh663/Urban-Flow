@@ -1,9 +1,23 @@
-const { app, BrowserWindow, shell, dialog } = require('electron');
+const { app, BrowserWindow, protocol, shell, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const http = require('http');
-const net = require('net');
-const { spawn, exec } = require('child_process');
+const readline = require('readline');
+const { spawn } = require('child_process');
+const crypto = require('crypto');
+
+// Register custom scheme 'app' before ready
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'app',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true,
+      stream: true,
+    },
+  },
+]);
 
 const LOG_FILE = path.join(__dirname, 'electron.log');
 function log(...args) {
@@ -21,19 +35,19 @@ process.on('unhandledRejection', (reason) => {
 
 let mainWindow = null;
 let splashWindow = null;
-let backendProcess = null;
-let frontendServer = null;
+let pythonProcess = null;
 let isQuitting = false;
 
-let BACKEND_PORT = 8008;
-let FRONTEND_PORT = 5178;
-let BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
-let FRONTEND_URL = `http://127.0.0.1:${FRONTEND_PORT}`;
-
-// Directory paths
 const FRONTEND_DIR = path.resolve(__dirname, '..');
 const ROOT_DIR = path.resolve(FRONTEND_DIR, '..');
 const BACKEND_DIR = path.join(ROOT_DIR, 'backend');
+const UPLOAD_DIR = path.join(BACKEND_DIR, 'uploads');
+const CLIENT_DIR = path.join(FRONTEND_DIR, 'dist', 'client');
+const INDEX_HTML = path.join(CLIENT_DIR, 'index.html');
+
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
 
 const candidatePythons = [
   path.join(BACKEND_DIR, 'python', 'python.exe'),
@@ -41,36 +55,289 @@ const candidatePythons = [
   path.join(BACKEND_DIR, '.venv', 'python.exe'),
   path.join(BACKEND_DIR, 'python.exe'),
 ];
-let PYTHON_EXE = candidatePythons.find((p) => fs.existsSync(p));
-if (!PYTHON_EXE) {
-  PYTHON_EXE = 'python';
-}
+let PYTHON_EXE = candidatePythons.find((p) => fs.existsSync(p)) || 'python';
+const WORKER_SCRIPT = path.join(BACKEND_DIR, 'ipc_worker.py');
 
 const icoPath = path.join(FRONTEND_DIR, 'public', 'favicon.ico');
 const pngPath = path.join(FRONTEND_DIR, 'public', 'urban-flow-dark.png');
 const ICON_PATH = fs.existsSync(icoPath) ? icoPath : pngPath;
 
-function checkPortFree(port) {
-  return new Promise((resolve) => {
-    const server = net.createServer();
-    server.once('error', () => resolve(false));
-    server.once('listening', () => {
-      server.close(() => resolve(true));
-    });
-    server.listen(port, '127.0.0.1');
+// --- Portless Python IPC Bridge (stdin / stdout pipes) ---
+const pendingRequests = new Map();
+let isWorkerReady = false;
+let workerReadyResolve = null;
+const workerReadyPromise = new Promise((resolve) => {
+  workerReadyResolve = resolve;
+});
+
+function startPythonWorker() {
+  log('Spawning portless Python worker:', PYTHON_EXE, WORKER_SCRIPT);
+
+  pythonProcess = spawn(
+    PYTHON_EXE,
+    [WORKER_SCRIPT],
+    {
+      cwd: BACKEND_DIR,
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: Object.assign({}, process.env, {
+        PYTHONPATH: BACKEND_DIR,
+        PYTHONUNBUFFERED: '1',
+      }),
+    }
+  );
+
+  const rl = readline.createInterface({
+    input: pythonProcess.stdout,
+    crlfDelay: Infinity,
+  });
+
+  rl.on('line', (line) => {
+    line = line.trim();
+    if (!line) return;
+    try {
+      const msg = JSON.parse(line);
+      if (msg.event === 'ready') {
+        log('Python worker is READY (Portless IPC established).');
+        isWorkerReady = true;
+        if (workerReadyResolve) workerReadyResolve();
+        return;
+      }
+
+      const reqId = msg.id;
+      if (reqId && pendingRequests.has(reqId)) {
+        const { resolve, reject } = pendingRequests.get(reqId);
+        pendingRequests.delete(reqId);
+        if (msg.ok) {
+          resolve(msg.result);
+        } else {
+          reject(new Error(msg.error || 'Worker request failed.'));
+        }
+      }
+    } catch (e) {
+      log('Worker stdout parse error:', e.message, line);
+    }
+  });
+
+  pythonProcess.stderr.on('data', (data) => {
+    log('[Python stderr]', data.toString().trim());
+  });
+
+  pythonProcess.on('error', (err) => {
+    log('Python process spawn error:', err);
+  });
+
+  pythonProcess.on('exit', (code, signal) => {
+    log(`Python process exited with code ${code}, signal ${signal}`);
+    for (const [id, { reject }] of pendingRequests.entries()) {
+      reject(new Error('Python worker terminated unexpectedly.'));
+    }
+    pendingRequests.clear();
   });
 }
 
-async function findAvailablePort(startPort, maxAttempts = 50) {
-  for (let port = startPort; port < startPort + maxAttempts; port++) {
-    const free = await checkPortFree(port);
-    if (free) return port;
-  }
-  return startPort;
+function sendIpcRequest(action, data = {}, timeoutMs = 30000) {
+  return new Promise(async (resolve, reject) => {
+    if (!isWorkerReady) {
+      await Promise.race([
+        workerReadyPromise,
+        new Promise((_, r) => setTimeout(() => r(new Error('Timed out waiting for Python worker to initialize.')), 15000)),
+      ]);
+    }
+
+    if (!pythonProcess || pythonProcess.killed) {
+      return reject(new Error('Python worker is not running.'));
+    }
+
+    const reqId = crypto.randomUUID();
+    const timer = setTimeout(() => {
+      if (pendingRequests.has(reqId)) {
+        pendingRequests.delete(reqId);
+        reject(new Error(`Request '${action}' timed out after ${timeoutMs}ms.`));
+      }
+    }, timeoutMs);
+
+    pendingRequests.set(reqId, {
+      resolve: (res) => { clearTimeout(timer); resolve(res); },
+      reject: (err) => { clearTimeout(timer); reject(err); },
+    });
+
+    const payload = JSON.stringify({ id: reqId, action, data }) + '\n';
+    pythonProcess.stdin.write(payload, 'utf-8');
+  });
+}
+
+// --- MIME types for file serving ---
+const mimeTypes = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.mp4': 'video/mp4',
+};
+
+// --- Custom app:// Protocol Handler (Zero Network Ports) ---
+function registerProtocolHandler() {
+  protocol.handle('app', async (req) => {
+    try {
+      const parsedUrl = new URL(req.url);
+      let pathname = decodeURIComponent(parsedUrl.pathname);
+      log(`[app://] ${req.method} ${pathname}`);
+
+      // 1. API: /api/health
+      if (pathname === '/api/health') {
+        const result = await sendIpcRequest('health', {});
+        return new Response(JSON.stringify(result), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      // 2. API: /api/simulate
+      if (pathname === '/api/simulate' && req.method === 'POST') {
+        const body = await req.json().catch(() => ({}));
+        const result = await sendIpcRequest('simulate', body);
+        return new Response(JSON.stringify(result), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      // 3. API: /api/calculate-signal-plan
+      if (pathname === '/api/calculate-signal-plan' && req.method === 'POST') {
+        const body = await req.json().catch(() => ({}));
+        const result = await sendIpcRequest('calculate-signal-plan', body);
+        return new Response(JSON.stringify(result), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      // 4. API: /api/reports/:id
+      const reportMatch = pathname.match(/^\/api\/reports\/([a-zA-Z0-9]+)$/);
+      if (reportMatch) {
+        const reportId = reportMatch[1];
+        const result = await sendIpcRequest('get-report', { report_id: reportId });
+        return new Response(JSON.stringify(result), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      // 5. API: /api/reports/:id/cycle
+      const cycleMatch = pathname.match(/^\/api\/reports\/([a-zA-Z0-9]+)\/cycle$/);
+      if (cycleMatch && req.method === 'PUT') {
+        const reportId = cycleMatch[1];
+        const body = await req.json().catch(() => ({}));
+        const result = await sendIpcRequest('update-cycle', { report_id: reportId, ...body });
+        return new Response(JSON.stringify(result), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      // 6. API: /api/reports/:id/counts
+      const countsMatch = pathname.match(/^\/api\/reports\/([a-zA-Z0-9]+)\/counts$/);
+      if (countsMatch && req.method === 'PUT') {
+        const reportId = countsMatch[1];
+        const body = await req.json().catch(() => ({}));
+        const result = await sendIpcRequest('update-counts', { report_id: reportId, ...body });
+        return new Response(JSON.stringify(result), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      // 7. API: /api/analyse-image and /api/analyse-video (multipart/form-data upload)
+      if (pathname === '/api/analyse-image' || pathname === '/api/analyse-video') {
+        const isVideo = pathname === '/api/analyse-video';
+        const formData = await req.formData();
+        const file = formData.get('file');
+        if (!file) {
+          return new Response(JSON.stringify({ detail: 'No file uploaded.' }), {
+            status: 400,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+
+        const ext = path.extname(file.name || (isVideo ? '.mp4' : '.jpg')).toLowerCase();
+        const tempName = `${crypto.randomUUID()}${ext}`;
+        const tempPath = path.join(UPLOAD_DIR, tempName);
+
+        const arrayBuffer = await file.arrayBuffer();
+        fs.writeFileSync(tempPath, Buffer.from(arrayBuffer));
+
+        const result = await sendIpcRequest(isVideo ? 'analyse-video' : 'analyse-image', {
+          file_path: tempPath,
+          junction_name: formData.get('junction_name') || null,
+          green_budget: Number(formData.get('green_budget')) || 120,
+          yellow_seconds: Number(formData.get('yellow_seconds')) || 3,
+        });
+
+        return new Response(JSON.stringify(result), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+
+      // 8. Static uploaded media files (/uploads/...)
+      if (pathname.startsWith('/uploads/')) {
+        const filename = path.basename(pathname);
+        const filePath = path.join(UPLOAD_DIR, filename);
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+          const ext = path.extname(filePath).toLowerCase();
+          const contentType = mimeTypes[ext] || 'application/octet-stream';
+          const fileData = fs.readFileSync(filePath);
+          return new Response(fileData, {
+            headers: {
+              'content-type': contentType,
+              'cache-control': 'public, max-age=31536000, immutable',
+            },
+          });
+        }
+        return new Response('Not Found', { status: 404 });
+      }
+
+      // 9. Static frontend assets from dist/client
+      if (pathname !== '/' && pathname !== '') {
+        const filePath = path.join(CLIENT_DIR, pathname);
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+          const ext = path.extname(filePath).toLowerCase();
+          const contentType = mimeTypes[ext] || 'application/octet-stream';
+          const fileData = fs.readFileSync(filePath);
+          return new Response(fileData, {
+            headers: {
+              'content-type': contentType,
+              'cache-control': 'public, max-age=31536000, immutable',
+            },
+          });
+        }
+      }
+
+      // 10. Fallback: serve index.html (SPA entry)
+      if (fs.existsSync(INDEX_HTML)) {
+        const html = fs.readFileSync(INDEX_HTML, 'utf-8');
+        return new Response(html, {
+          headers: {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': 'no-cache',
+          },
+        });
+      }
+
+      return new Response('Application bundle missing index.html.', { status: 500 });
+    } catch (err) {
+      log('[Protocol Error]', err);
+      return new Response(JSON.stringify({ detail: err.message || 'Internal Error' }), {
+        status: 500,
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+  });
 }
 
 function createSplash() {
-  log('Creating splash window...');
   splashWindow = new BrowserWindow({
     width: 460,
     height: 300,
@@ -83,8 +350,8 @@ function createSplash() {
     icon: ICON_PATH,
     webPreferences: {
       nodeIntegration: false,
-      contextIsolation: true
-    }
+      contextIsolation: true,
+    },
   });
 
   const splashHtml = `<!DOCTYPE html>
@@ -139,212 +406,11 @@ function createSplash() {
   <h1>Urban Flow</h1>
   <p>Adaptive Traffic Signal System</p>
   <div class="progress-wrap"><div class="progress-bar"></div></div>
-  <div class="status">Starting local AI engine & signal planner...</div>
+  <div class="status">Starting local AI engine & signal planner (Portless)...</div>
 </body>
 </html>`;
 
   splashWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(splashHtml));
-}
-
-function checkUrbanFlowReady(url, timeoutMs = 25000, intervalMs = 300) {
-  const startTime = Date.now();
-  return new Promise((resolve) => {
-    let done = false;
-    const timer = setInterval(() => {
-      if (Date.now() - startTime > timeoutMs) {
-        clearInterval(timer);
-        if (!done) {
-          done = true;
-          log(`checkUrbanFlowReady timeout on ${url}`);
-          resolve(false);
-        }
-        return;
-      }
-      const req = http.get(url, (res) => {
-        let raw = '';
-        res.on('data', (chunk) => { raw += chunk; });
-        res.on('end', () => {
-          if (!done && res.statusCode === 200) {
-            try {
-              const data = JSON.parse(raw);
-              if (data.app === 'urban_flow' || data.computer_vision_ready !== undefined) {
-                done = true;
-                clearInterval(timer);
-                log(`checkUrbanFlowReady verified Urban Flow backend (${res.statusCode}) on ${url}`);
-                return resolve(true);
-              }
-            } catch (e) {}
-          }
-        });
-      });
-      req.on('error', () => {});
-      req.setTimeout(800, () => req.destroy());
-    }, intervalMs);
-  });
-}
-
-async function startBackend() {
-  BACKEND_PORT = await findAvailablePort(8008);
-  BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
-  log(`Resolved Urban Flow backend port: ${BACKEND_PORT}`);
-
-  return new Promise((resolve) => {
-    log('Launching background Python backend using:', PYTHON_EXE, 'on port', BACKEND_PORT);
-    try {
-      const logPath = path.join(BACKEND_DIR, 'backend.log');
-      let stdioOption = 'ignore';
-      try {
-        const logFd = fs.openSync(logPath, 'a');
-        stdioOption = ['ignore', logFd, logFd];
-      } catch (e) {
-        stdioOption = 'ignore';
-      }
-
-      backendProcess = spawn(
-        PYTHON_EXE,
-        ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(BACKEND_PORT), '--app-dir', BACKEND_DIR],
-        {
-          cwd: BACKEND_DIR,
-          windowsHide: true,
-          shell: false,
-          stdio: stdioOption,
-          env: Object.assign({}, process.env, { PYTHONPATH: BACKEND_DIR })
-        }
-      );
-
-      backendProcess.on('error', (err) => {
-        log('Failed to spawn backend:', err);
-      });
-    } catch (err) {
-      log('Spawn error for backend:', err);
-    }
-
-    checkUrbanFlowReady(BACKEND_URL + '/api/health', 25000).then(() => {
-      log('Backend ready check completed.');
-      resolve();
-    });
-  });
-}
-
-const mimeTypes = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon',
-  '.woff2': 'font/woff2',
-  '.mp4': 'video/mp4',
-};
-
-function proxyRequest(req, res, targetUrl) {
-  const parsedTarget = new URL(targetUrl);
-  const options = {
-    hostname: parsedTarget.hostname,
-    port: parsedTarget.port,
-    path: req.url,
-    method: req.method,
-    headers: { ...req.headers, host: `${parsedTarget.hostname}:${parsedTarget.port}` }
-  };
-
-  const proxyReq = http.request(options, (proxyRes) => {
-    res.writeHead(proxyRes.statusCode, proxyRes.headers);
-    proxyRes.pipe(res);
-  });
-
-  proxyReq.on('error', (err) => {
-    log('Proxy error:', err.message);
-    res.writeHead(502, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ detail: 'Backend service unavailable on ' + targetUrl }));
-  });
-
-  req.pipe(proxyReq);
-}
-
-async function startFrontend() {
-  FRONTEND_PORT = await findAvailablePort(5178);
-  FRONTEND_URL = `http://127.0.0.1:${FRONTEND_PORT}`;
-  log(`Resolved Urban Flow frontend port: ${FRONTEND_PORT}`);
-
-  const clientDir = path.join(FRONTEND_DIR, 'dist', 'client');
-  const indexHtmlPath = path.join(clientDir, 'index.html');
-  const serverPath = path.join(FRONTEND_DIR, 'dist', 'server', 'server.js');
-
-  return new Promise((resolve) => {
-    frontendServer = http.createServer(async (req, res) => {
-      try {
-        const parsedUrl = new URL(req.url, FRONTEND_URL);
-        const pathname = parsedUrl.pathname;
-
-        // 1. Transparent API & uploads proxy to backend
-        if (pathname.startsWith('/api') || pathname.startsWith('/uploads')) {
-          return proxyRequest(req, res, BACKEND_URL);
-        }
-
-        // 2. Static file in dist/client
-        if (pathname !== '/' && pathname !== '') {
-          const filePath = path.join(clientDir, pathname);
-          if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-            const ext = path.extname(filePath).toLowerCase();
-            const contentType = mimeTypes[ext] || 'application/octet-stream';
-            res.writeHead(200, {
-              'Content-Type': contentType,
-              'Cache-Control': 'public, max-age=31536000, immutable'
-            });
-            fs.createReadStream(filePath).pipe(res);
-            return;
-          }
-        }
-
-        // 3. Serve index.html (SPA entry)
-        if (fs.existsSync(indexHtmlPath)) {
-          res.writeHead(200, {
-            'Content-Type': 'text/html; charset=utf-8',
-            'Cache-Control': 'no-cache'
-          });
-          fs.createReadStream(indexHtmlPath).pipe(res);
-          return;
-        }
-
-        // 4. Fallback: SSR if index.html is missing
-        if (fs.existsSync(serverPath)) {
-          try {
-            const { pathToFileURL } = require('url');
-            const mod = await import(pathToFileURL(serverPath).href);
-            const handler = mod.default ?? mod;
-            const fullUrl = `http://127.0.0.1:${FRONTEND_PORT}${req.url}`;
-            const ssrRes = await handler.fetch(new Request(fullUrl));
-            res.writeHead(ssrRes.status, Object.fromEntries(ssrRes.headers.entries()));
-            const body = await ssrRes.text();
-            res.end(body);
-            return;
-          } catch (e) {
-            log('SSR fallback error:', e.message);
-          }
-        }
-
-        res.writeHead(404);
-        res.end('Not Found');
-      } catch (err) {
-        log('Frontend request error:', err);
-        res.writeHead(500);
-        res.end('Internal Server Error: ' + err.message);
-      }
-    });
-
-    frontendServer.on('error', (err) => {
-      log('Frontend server error:', err);
-      resolve();
-    });
-
-    frontendServer.listen(FRONTEND_PORT, '127.0.0.1', () => {
-      log(`Native frontend server running at ${FRONTEND_URL}`);
-      resolve();
-    });
-  });
 }
 
 function createWindow() {
@@ -362,12 +428,13 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      spellcheck: false
-    }
+      spellcheck: false,
+    },
   });
 
-  log('Loading frontend URL into mainWindow:', FRONTEND_URL);
-  mainWindow.loadURL(FRONTEND_URL);
+  const appUrl = 'app://urbanflow/index.html';
+  log('Loading portless URL into mainWindow:', appUrl);
+  mainWindow.loadURL(appUrl);
 
   let isMainShown = false;
   const showMainWindow = () => {
@@ -390,7 +457,7 @@ function createWindow() {
             log('splashWindow closed smoothly.');
           }
         } catch (e) {}
-      }, 500);
+      }, 400);
     }
   };
 
@@ -404,7 +471,6 @@ function createWindow() {
     showMainWindow();
   });
 
-  // Safety fallback: reveal window after 4 seconds
   setTimeout(() => {
     if (!isMainShown) {
       log('Fallback timer: showing mainWindow');
@@ -416,7 +482,7 @@ function createWindow() {
     log(`mainWindow did-fail-load: ${errorCode} ${errorDescription}`);
     setTimeout(() => {
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.loadURL(FRONTEND_URL);
+        mainWindow.loadURL(appUrl);
       }
     }, 1500);
   });
@@ -437,32 +503,21 @@ function cleanupProcesses() {
   isQuitting = true;
   log('cleanupProcesses() running...');
 
-  if (frontendServer) {
-    try { frontendServer.close(); } catch (e) {}
-    frontendServer = null;
-  }
-
-  if (backendProcess && backendProcess.pid) {
-    if (process.platform === 'win32') {
-      exec(`taskkill /pid ${backendProcess.pid} /T /F`, () => {});
-    } else {
-      backendProcess.kill('SIGTERM');
-    }
-    backendProcess = null;
+  if (pythonProcess && !pythonProcess.killed) {
+    try {
+      pythonProcess.kill('SIGTERM');
+    } catch (e) {}
+    pythonProcess = null;
   }
 }
 
 app.whenReady().then(async () => {
-  log('app.whenReady() fired');
+  log('app.whenReady() fired - initializing portless engine...');
   createSplash();
-  try {
-    await Promise.all([
-      startBackend(),
-      startFrontend()
-    ]);
-  } catch (err) {
-    log('Startup error in Promise.all:', err);
-  }
+  registerProtocolHandler();
+  startPythonWorker();
+
+  await workerReadyPromise.catch(() => {});
   createWindow();
 
   app.on('activate', () => {
