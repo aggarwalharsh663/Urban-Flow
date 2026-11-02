@@ -6,7 +6,7 @@ import {
   Sparkles, UploadCloud, Video, X,
 } from "lucide-react";
 
-const API = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+const API = import.meta.env.VITE_API_URL || "";
 const TrafficChart = lazy(() => import("./TrafficChart.jsx"));
 const DIRECTIONS = ["North", "South", "East", "West"];
 const COLORS = { North: "oklch(0.85 0.17 88)", South: "oklch(0.62 0.15 255)", East: "oklch(0.66 0.2 28)", West: "oklch(0.68 0.15 150)" };
@@ -19,14 +19,17 @@ const PRESETS = {
 };
 
 async function request(url, options) {
-  const response = await fetch(`${API}${url}`, options);
+  const fullUrl = url.startsWith("http") ? url : `${API}${url}`;
+  const response = await fetch(fullUrl, options);
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.detail || "The request could not be completed.");
   return body;
 }
 
 function imageUrl(path) {
-  return path ? `${API}${path}` : "";
+  if (!path) return "";
+  if (path.startsWith("http")) return path;
+  return `${API}${path}`;
 }
 
 function formatDate(value) {

@@ -47,9 +47,9 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:5174", "http://127.0.0.1:5174", "http://localhost:8001", "http://127.0.0.1:8001"],
+    allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT"],
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
@@ -113,6 +113,7 @@ async def _store_upload(file: UploadFile, allowed: set[str]) -> tuple[Path, str]
 @app.get("/api/health")
 def health() -> dict:
     return {
+        "app": "urban_flow",
         "status": "ok",
         **get_detection_status(),
         **get_gemini_status(),
