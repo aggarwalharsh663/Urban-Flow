@@ -26,6 +26,7 @@ from security_config import (
     MAX_UPLOAD_SIZE_BYTES,
     MAX_VEHICLE_COUNT,
     cleanup_storage,
+    read_report_atomic,
     sanitize_junction_name,
     save_report_atomic,
     secure_file_permissions,
@@ -231,7 +232,7 @@ def handle_get_report(data: dict) -> dict:
     report_path = REPORT_DIR / f"{report_id}.json"
     if not report_path.is_file():
         raise FileNotFoundError("Report not found.")
-    return json.loads(report_path.read_text(encoding="utf-8"))
+    return read_report_atomic(report_path)
 
 
 def handle_update_cycle(data: dict) -> dict:
@@ -242,7 +243,7 @@ def handle_update_cycle(data: dict) -> dict:
     if not report_path.is_file():
         raise FileNotFoundError("Report not found.")
 
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report = read_report_atomic(report_path)
     green_budget = int(data.get("green_budget", report.get("cycle", {}).get("total_green_seconds", DEFAULT_GREEN_BUDGET)))
     yellow_seconds = int(data.get("yellow_seconds", report.get("cycle", {}).get("yellow_seconds_per_phase", DEFAULT_YELLOW_SECONDS)))
     all_red_seconds = int(data.get("all_red_seconds", report.get("cycle", {}).get("all_red_seconds_per_phase", DEFAULT_ALL_RED_SECONDS)))
@@ -275,7 +276,7 @@ def handle_update_counts(data: dict) -> dict:
         raise FileNotFoundError("Report not found.")
 
     counts = _validate_counts(data.get("counts", {}))
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report = read_report_atomic(report_path)
     analysis_note = report.get("analysis_note") or ""
     review_note = "Directional counts were reviewed and corrected manually; the original detections are unchanged."
     if review_note not in analysis_note:

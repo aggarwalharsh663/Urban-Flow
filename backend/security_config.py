@@ -163,9 +163,9 @@ def secure_file_permissions(path: Path):
     """
     Apply strict file system ACLs/permissions to secure secrets at rest.
     On Windows, strips inherited permissions and grants exclusive access to current user.
-    On POSIX, sets mode 0o600.
+    On POSIX, sets mode 0o600 for files or 0o700 for directories.
     """
-    if not path.is_file():
+    if not path.exists():
         return
     if sys.platform == "win32":
         try:
@@ -658,6 +658,21 @@ GLOBAL_INFERENCE_MANAGER = InferenceConcurrencyManager()
 _report_file_lock = threading.Lock()
 
 
+def read_report_atomic(report_path: Path, max_retries: int = 5, backoff: float = 0.05) -> dict:
+    """
+    Safely reads a report with concurrency lock coordination and retry mechanism
+    to prevent transient Windows file-locking collisions during rapid concurrent updates.
+    """
+    with _report_file_lock:
+        for attempt in range(max_retries):
+            try:
+                return json.loads(report_path.read_text(encoding="utf-8"))
+            except (PermissionError, json.JSONDecodeError):
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(backoff * (attempt + 1))
+
+
 def sanitize_junction_name(name: Optional[str]) -> str:
     """Sanitize and length-limit junction name."""
     if not name:
@@ -672,6 +687,7 @@ def save_report_atomic(report: dict, report_dir: Path, source_channel: str = "ap
     Maintains revision history, timestamp, and modification audit metadata.
     """
     report_dir.mkdir(parents=True, exist_ok=True)
+    secure_file_permissions(report_dir)
     report_id = report.get("report_id")
     if not report_id or not str(report_id).isalnum():
         raise ValueError("Invalid or missing report_id.")
@@ -711,7 +727,6 @@ def save_report_atomic(report: dict, report_dir: Path, source_channel: str = "ap
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(temp_path, target_path)
-            secure_file_permissions(target_path)
         except Exception:
             if os.path.exists(temp_path):
                 os.remove(temp_path)

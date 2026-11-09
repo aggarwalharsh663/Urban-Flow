@@ -43,6 +43,7 @@ from security_config import (
     RATE_LIMIT_DEFAULTS,
     cleanup_storage,
     get_allowed_origins,
+    read_report_atomic,
     sanitize_junction_name,
     save_report_atomic,
     secure_file_permissions,
@@ -562,7 +563,7 @@ def get_report(
     report_path = REPORT_DIR / f"{report_id}.json"
     if not report_path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found.")
-    return json.loads(report_path.read_text(encoding="utf-8"))
+    return read_report_atomic(report_path)
 
 
 @app.put("/api/reports/{report_id}/cycle")
@@ -579,7 +580,7 @@ def update_report_cycle(
     if not report_path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found.")
 
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report = read_report_atomic(report_path)
     updated_report = create_signal_plan(
         report["counts"],
         junction_name=report["junction_name"],
@@ -614,7 +615,7 @@ def update_report_counts(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found.")
 
     counts = _validate_counts(payload.counts)
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report = read_report_atomic(report_path)
     analysis_note = report.get("analysis_note") or ""
     review_note = (
         "Directional counts were reviewed and corrected manually; the original detections are unchanged."
