@@ -1,4 +1,4 @@
-const { app, BrowserWindow, protocol, shell, net, ipcMain } = require('electron');
+const { app, BrowserWindow, protocol, shell, net, ipcMain, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const readline = require('readline');
@@ -106,8 +106,19 @@ function applySecurityHeaders(headers = {}) {
     'x-content-type-options': 'nosniff',
     'x-frame-options': 'DENY',
     'referrer-policy': 'strict-origin-when-cross-origin',
+    'cross-origin-opener-policy': 'same-origin',
+    'cross-origin-resource-policy': 'same-origin',
     'content-security-policy': CSP_HEADER,
   }, headers);
+}
+
+function isAllowedOrigin(urlStr) {
+  try {
+    const parsed = new URL(urlStr);
+    return parsed.protocol === 'app:' && parsed.hostname === 'urbanflow';
+  } catch {
+    return false;
+  }
 }
 
 // Anti-Path-Traversal containment validator (Finding 2)
@@ -284,11 +295,19 @@ function sendIpcRequest(action, data = {}, timeoutMs = 30000) {
 
 // Secure IPC handlers for ContextBridge Preload (SEC-RES-05)
 if (ipcMain) {
-  ipcMain.handle('get-api-token', async () => {
+  ipcMain.handle('get-api-token', async (event) => {
+    const origin = event.senderFrame ? event.senderFrame.url : '';
+    if (origin && !isAllowedOrigin(origin)) {
+      throw new Error('Unauthorized IPC sender origin');
+    }
     return process.env.URBAN_FLOW_API_TOKEN || '';
   });
 
   ipcMain.handle('worker-request', async (event, payload) => {
+    const origin = event.senderFrame ? event.senderFrame.url : '';
+    if (origin && !isAllowedOrigin(origin)) {
+      throw new Error('Unauthorized IPC sender origin');
+    }
     const { action, data } = payload || {};
     if (!action || typeof action !== 'string') {
       throw new Error('Invalid IPC action');
@@ -302,6 +321,13 @@ function registerProtocolHandler() {
   protocol.handle('app', async (req) => {
     try {
       const parsedUrl = new URL(req.url);
+      if (parsedUrl.hostname !== 'urbanflow') {
+        log('Rejected unauthorized app host:', parsedUrl.hostname);
+        return new Response('Forbidden Host', {
+          status: 403,
+          headers: applySecurityHeaders({ 'content-type': 'text/plain' }),
+        });
+      }
       let rawPathname = parsedUrl.pathname;
       log(`[app://] ${req.method} ${rawPathname}`);
 
@@ -664,8 +690,15 @@ function createWindow() {
 
   // Navigation lock (Finding 9: Restrict navigation to approved origins)
   mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
-    if (!navigationUrl.startsWith('app://')) {
+    if (!isAllowedOrigin(navigationUrl)) {
       log('Prevented unauthorized navigation to:', navigationUrl);
+      event.preventDefault();
+    }
+  });
+
+  mainWindow.webContents.on('will-redirect', (event, navigationUrl) => {
+    if (!isAllowedOrigin(navigationUrl)) {
+      log('Prevented unauthorized redirect to:', navigationUrl);
       event.preventDefault();
     }
   });
@@ -710,12 +743,32 @@ app.whenReady().then(async () => {
   createWindow();
 
   // Prevent arbitrary webview attachment and enforce strict window opening policy
+  if (session && session.defaultSession) {
+    session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+      log('Blocked permission request for:', permission);
+      callback(false);
+    });
+    session.defaultSession.setPermissionCheckHandler(() => false);
+  }
+
   app.on('web-contents-created', (event, contents) => {
     contents.on('will-attach-webview', (e) => {
       e.preventDefault();
       log('Blocked unauthorized webview attachment.');
     });
     contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    contents.on('will-navigate', (e, navUrl) => {
+      if (!isAllowedOrigin(navUrl)) {
+        e.preventDefault();
+        log('Blocked web-contents navigation to:', navUrl);
+      }
+    });
+    contents.on('will-redirect', (e, redUrl) => {
+      if (!isAllowedOrigin(redUrl)) {
+        e.preventDefault();
+        log('Blocked web-contents redirect to:', redUrl);
+      }
+    });
   });
 
   app.on('activate', () => {

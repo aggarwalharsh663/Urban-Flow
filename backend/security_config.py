@@ -549,6 +549,12 @@ class ProcessSharedRateLimiter:
                 )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_key_time ON rate_limits(key, timestamp);")
             secure_file_permissions(self.db_path)
+            for extra in (
+                self.db_path.with_name(self.db_path.name + "-wal"),
+                self.db_path.with_name(self.db_path.name + "-shm"),
+            ):
+                if extra.is_file():
+                    secure_file_permissions(extra)
         except Exception as e:
             logger.warning("Could not initialize SQLite rate limiter (%s). Falling back to in-memory: %s", self.db_path, e)
             self._use_fallback = True
@@ -705,6 +711,7 @@ def save_report_atomic(report: dict, report_dir: Path, source_channel: str = "ap
                 f.flush()
                 os.fsync(f.fileno())
             os.replace(temp_path, target_path)
+            secure_file_permissions(target_path)
         except Exception:
             if os.path.exists(temp_path):
                 os.remove(temp_path)

@@ -139,4 +139,35 @@ const mainContent = fs.readFileSync(mainCjsPath, 'utf-8');
 assert.equal(mainContent.includes("preload.cjs"), true, 'main.cjs must configure preload.cjs');
 console.log('✔ Electron main webPreferences preload registration verified');
 
+// Test 12: Allowed origin validator
+function isAllowedOrigin(urlStr) {
+  try {
+    const parsed = new URL(urlStr);
+    return parsed.protocol === 'app:' && parsed.hostname === 'urbanflow';
+  } catch {
+    return false;
+  }
+}
+assert.equal(isAllowedOrigin('app://urbanflow/'), true, 'app://urbanflow/ must be allowed');
+assert.equal(isAllowedOrigin('app://urbanflow/api/health'), true, 'app://urbanflow/api/health must be allowed');
+assert.equal(isAllowedOrigin('app://attacker.com/'), false, 'Foreign app:// host must be blocked');
+assert.equal(isAllowedOrigin('http://evil.com/'), false, 'External http must be blocked');
+assert.equal(isAllowedOrigin('file:///etc/passwd'), false, 'file protocol must be blocked');
+assert.equal(isAllowedOrigin('javascript:alert(1)'), false, 'javascript protocol must be blocked');
+console.log('✔ Strict origin and navigation isolation verified');
+
+// Test 13: Protocol handler hostname check enforced in main.cjs
+assert.equal(mainContent.includes("parsedUrl.hostname !== 'urbanflow'"), true, 'main.cjs must strictly validate protocol hostname');
+console.log('✔ Protocol handler hostname validation verified');
+
+// Test 14: Permissions handler denies ambient permission requests
+assert.equal(mainContent.includes("setPermissionRequestHandler"), true, 'main.cjs must set permission request handler');
+assert.equal(mainContent.includes("setPermissionCheckHandler"), true, 'main.cjs must set permission check handler');
+console.log('✔ Device permissions denial policy verified');
+
+// Test 15: Cross-Origin Opener & Resource Policy headers verified
+assert.equal(mainContent.includes("'cross-origin-opener-policy': 'same-origin'"), true, 'main.cjs must specify COOP same-origin');
+assert.equal(mainContent.includes("'cross-origin-resource-policy': 'same-origin'"), true, 'main.cjs must specify CORP same-origin');
+console.log('✔ Cross-Origin Opener & Resource Policy headers verified');
+
 console.log('--- ALL ELECTRON SECURITY TESTS PASSED ---');
