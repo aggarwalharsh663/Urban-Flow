@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -363,6 +364,11 @@ def pop_cancelled_request(req_id: Optional[str]) -> bool:
         return False
 
 
+def handle_directions(data: dict) -> dict:
+    """Return available junction directions (read scope)."""
+    return {"directions": list(DIRECTIONS)}
+
+
 def handle_cancel(data: dict) -> dict:
     """Handle task cancellation request from Electron (R6)."""
     cancel_id = str(data.get("cancel_id", "")).strip()
@@ -371,10 +377,99 @@ def handle_cancel(data: dict) -> dict:
     return {"cancelled": cancel_id}
 
 
+# --- IPC Worker Authentication & Action Scoping (U-02) ---
+ACTION_REQUIRED_SCOPES = {
+    "health": "read",
+    "directions": "read",
+    "get-report": "read",
+    "simulate": "reports:write",
+    "calculate-signal-plan": "reports:write",
+    "signal-plan": "reports:write",
+    "update-cycle": "reports:write",
+    "update-counts": "reports:write",
+    "analyse-image": "inference:write",
+    "analyse-video": "inference:write",
+}
+
+
+def get_expected_ipc_tokens() -> list[str]:
+    """Retrieve expected session / API tokens from environment or security config."""
+    tokens = []
+    env_token = os.environ.get("URBAN_FLOW_IPC_TOKEN", "").strip()
+    if env_token:
+        tokens.append(env_token)
+    try:
+        from security_config import get_or_create_api_token
+        master = get_or_create_api_token().strip()
+        if master and master not in tokens:
+            tokens.append(master)
+    except Exception:
+        pass
+    return tokens
+
+
+def verify_ipc_auth(req: dict) -> tuple[bool, str]:
+    """
+    Validate caller token using constant-time comparison and check required action scope (U-02).
+    Returns (is_authorized, error_message).
+    """
+    action = req.get("action")
+    if action == "cancel":
+        # Cancellation is permitted to abort active tasks
+        return True, ""
+
+    required_scope = ACTION_REQUIRED_SCOPES.get(action)
+    if not required_scope:
+        return False, f"Unknown action: {action}"
+
+    # Extract token from top-level or data payload
+    token = req.get("token")
+    if not token and isinstance(req.get("data"), dict):
+        token = req["data"].get("token")
+
+    if not token or not isinstance(token, str):
+        return False, "Unauthorized: invalid IPC token or insufficient scope"
+
+    token_str = token.strip()
+    expected_tokens = get_expected_ipc_tokens()
+    is_valid_token = False
+
+    for exp in expected_tokens:
+        if exp and hmac.compare_digest(token_str, exp):
+            is_valid_token = True
+            break
+
+    # Also check against derived scoped tokens from security_config
+    if not is_valid_token:
+        try:
+            from security_config import get_token_scopes
+            scopes = get_token_scopes(token_str)
+            if scopes and (required_scope in scopes or "admin" in scopes):
+                is_valid_token = True
+        except Exception:
+            pass
+
+    if not is_valid_token:
+        return False, "Unauthorized: invalid IPC token or insufficient scope"
+
+    # Verify scope attached to the request
+    caller_scope = req.get("scope")
+    if not caller_scope and isinstance(req.get("data"), dict):
+        caller_scope = req["data"].get("scope")
+
+    if caller_scope:
+        if caller_scope != required_scope and caller_scope != "admin":
+            return False, "Unauthorized: invalid IPC token or insufficient scope"
+
+    return True, ""
+
+
 HANDLERS = {
     "health": handle_health,
+    "directions": handle_directions,
     "simulate": handle_simulate,
     "calculate-signal-plan": handle_calculate_signal_plan,
+    "signal-plan": handle_calculate_signal_plan,
     "analyse-image": lambda d, req_id=None: handle_analyse(d, video=False, req_id=req_id),
     "analyse-video": lambda d, req_id=None: handle_analyse(d, video=True, req_id=req_id),
     "get-report": handle_get_report,
@@ -382,6 +477,45 @@ HANDLERS = {
     "update-counts": handle_update_counts,
     "cancel": handle_cancel,
 }
+
+
+def process_ipc_request(req: dict) -> dict:
+    """
+    Authenticate, validate action scope, and process a single IPC request (U-02).
+    """
+    req_id = req.get("id")
+    action = req.get("action")
+    data = req.get("data") or {}
+
+    authorized, auth_err = verify_ipc_auth(req)
+    if not authorized:
+        LOGGER.warning("IPC request rejected: action=%s, reason=%s", action, auth_err)
+        return {"id": req_id, "ok": False, "error": auth_err}
+
+    if pop_cancelled_request(req_id):
+        LOGGER.info("Skipping execution of pre-cancelled request: %s", req_id)
+        return {"id": req_id, "ok": True, "result": {"cancelled": True}}
+
+    handler = HANDLERS.get(action)
+    if not handler:
+        return {"id": req_id, "ok": False, "error": f"Unknown action: {action}"}
+
+    try:
+        if action in {"analyse-image", "analyse-video"}:
+            result = handler(data, req_id=req_id)
+        else:
+            result = handler(data)
+
+        if pop_cancelled_request(req_id):
+            LOGGER.info("Discarding result of cancelled request: %s", req_id)
+            return {"id": req_id, "ok": True, "result": {"cancelled": True}}
+
+        return {"id": req_id, "ok": True, "result": result}
+    except Exception as e:
+        LOGGER.exception("Error processing request: %s", e)
+        err_msg = str(e)
+        err_msg = os.path.basename(err_msg) if ("\\" in err_msg or "/" in err_msg) else err_msg
+        return {"id": req_id, "ok": False, "error": err_msg}
 
 
 def main():
@@ -417,34 +551,7 @@ def main():
         req = request_queue.get()
         if req is None:
             break
-        req_id = req.get("id")
-        action = req.get("action")
-        data = req.get("data") or {}
-
-        if pop_cancelled_request(req_id):
-            LOGGER.info("Skipping execution of pre-cancelled request: %s", req_id)
-            continue
-
-        handler = HANDLERS.get(action)
-        if not handler:
-            resp = {"id": req_id, "ok": False, "error": f"Unknown action: {action}"}
-        else:
-            try:
-                if action in {"analyse-image", "analyse-video"}:
-                    result = handler(data, req_id=req_id)
-                else:
-                    result = handler(data)
-
-                if pop_cancelled_request(req_id):
-                    LOGGER.info("Discarding result of cancelled request: %s", req_id)
-                    continue
-                resp = {"id": req_id, "ok": True, "result": result}
-            except Exception as e:
-                LOGGER.exception("Error processing request: %s", e)
-                err_msg = str(e)
-                err_msg = os.path.basename(err_msg) if ("\\" in err_msg or "/" in err_msg) else err_msg
-                resp = {"id": req_id, "ok": False, "error": err_msg}
-
+        resp = process_ipc_request(req)
         print(json.dumps(resp), flush=True)
 
 

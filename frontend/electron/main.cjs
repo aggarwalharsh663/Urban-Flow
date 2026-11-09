@@ -136,7 +136,12 @@ function safeDecodeURI(uri) {
   return current;
 }
 
-function resolveContainedPath(baseDir, requestedPath, allowedExtensions) {
+function resolveContainedPath(baseDir, requestedPath, allowedExtensions = null) {
+  // Fail-closed if allowedExtensions is omitted, null, empty, or not a Set (Item 3)
+  if (!allowedExtensions || !(allowedExtensions instanceof Set) || allowedExtensions.size === 0) {
+    return null;
+  }
+
   const decoded = safeDecodeURI(requestedPath);
   if (decoded === null) return null;
   // Reject null bytes, backslashes, control characters
@@ -162,7 +167,7 @@ function resolveContainedPath(baseDir, requestedPath, allowedExtensions) {
   }
 
   const ext = path.extname(resolved).toLowerCase();
-  if (allowedExtensions && !allowedExtensions.has(ext)) {
+  if (!allowedExtensions.has(ext)) {
     return null; // Disallowed extension
   }
 
@@ -196,6 +201,23 @@ const workerReadyPromise = new Promise((resolve) => {
   workerReadyResolve = resolve;
 });
 
+// Session secret for authenticated Electron main <-> Python IPC worker communication (U-02)
+const IPC_SESSION_TOKEN = crypto.randomBytes(32).toString('hex');
+
+const ACTION_SCOPES = {
+  'health': 'read',
+  'directions': 'read',
+  'get-report': 'read',
+  'simulate': 'reports:write',
+  'calculate-signal-plan': 'reports:write',
+  'signal-plan': 'reports:write',
+  'update-cycle': 'reports:write',
+  'update-counts': 'reports:write',
+  'analyse-image': 'inference:write',
+  'analyse-video': 'inference:write',
+  'cancel': 'admin',
+};
+
 function startPythonWorker() {
   log('Spawning portless Python worker:', PYTHON_EXE, WORKER_SCRIPT);
 
@@ -209,6 +231,7 @@ function startPythonWorker() {
       env: Object.assign({}, process.env, {
         PYTHONPATH: BACKEND_DIR,
         PYTHONUNBUFFERED: '1',
+        URBAN_FLOW_IPC_TOKEN: IPC_SESSION_TOKEN,
       }),
     }
   );
@@ -262,7 +285,7 @@ function startPythonWorker() {
   });
 }
 
-function sendIpcRequest(action, data = {}, timeoutMs = 30000) {
+function sendIpcRequest(action, data = {}, timeoutMs = 30000, scope = null) {
   return new Promise(async (resolve, reject) => {
     if (!isWorkerReady) {
       await Promise.race([
@@ -275,6 +298,7 @@ function sendIpcRequest(action, data = {}, timeoutMs = 30000) {
       return reject(new Error('Python worker is not running.'));
     }
 
+    const reqScope = scope || ACTION_SCOPES[action] || 'read';
     const reqId = crypto.randomUUID();
     const timer = setTimeout(() => {
       if (pendingRequests.has(reqId)) {
@@ -282,7 +306,13 @@ function sendIpcRequest(action, data = {}, timeoutMs = 30000) {
         // Cooperative cancellation signal to worker process (R6)
         if (pythonProcess && !pythonProcess.killed) {
           try {
-            pythonProcess.stdin.write(JSON.stringify({ id: crypto.randomUUID(), action: 'cancel', data: { cancel_id: reqId } }) + '\n');
+            pythonProcess.stdin.write(JSON.stringify({
+              id: crypto.randomUUID(),
+              action: 'cancel',
+              token: IPC_SESSION_TOKEN,
+              scope: 'admin',
+              data: { cancel_id: reqId }
+            }) + '\n');
           } catch (e) {}
         }
         reject(new Error(`Request '${action}' timed out after ${timeoutMs}ms.`));
@@ -294,7 +324,13 @@ function sendIpcRequest(action, data = {}, timeoutMs = 30000) {
       reject: (err) => { clearTimeout(timer); reject(err); },
     });
 
-    const payload = JSON.stringify({ id: reqId, action, data }) + '\n';
+    const payload = JSON.stringify({
+      id: reqId,
+      action,
+      token: IPC_SESSION_TOKEN,
+      scope: reqScope,
+      data
+    }) + '\n';
     pythonProcess.stdin.write(payload, 'utf-8');
   });
 }
@@ -302,8 +338,10 @@ function sendIpcRequest(action, data = {}, timeoutMs = 30000) {
 // Explicit Action Allowlist for IPC Worker Invocations (R2 & SEC-RES-05)
 const ALLOWED_IPC_ACTIONS = new Set([
   'health',
+  'directions',
   'simulate',
   'calculate-signal-plan',
+  'signal-plan',
   'analyse-image',
   'analyse-video',
   'get-report',
@@ -312,7 +350,7 @@ const ALLOWED_IPC_ACTIONS = new Set([
   'cancel',
 ]);
 
-// Secure IPC handlers for ContextBridge Preload (R2: Raw API token retrieval is completely eliminated)
+// Secure IPC handlers for ContextBridge Preload (R2 & U-02: Scoped authorization enforced)
 if (ipcMain) {
   ipcMain.handle('worker-request', async (event, payload) => {
     const origin = event.senderFrame ? event.senderFrame.url : '';
@@ -325,11 +363,16 @@ if (ipcMain) {
       log('Rejected unapproved IPC action:', action);
       throw new Error('Forbidden or invalid IPC action: ' + action);
     }
+    const requiredScope = ACTION_SCOPES[action];
+    if (!requiredScope) {
+      log('Rejected IPC action without mapped scope:', action);
+      throw new Error('Forbidden or invalid IPC action scope: ' + action);
+    }
     // Limit payload serialization size to 5 MB
     if (data && JSON.stringify(data).length > 5 * 1024 * 1024) {
       throw new Error('IPC request payload exceeds maximum limit of 5 MB.');
     }
-    return sendIpcRequest(action, data || {});
+    return sendIpcRequest(action, data || {}, 30000, requiredScope);
   });
 }
 
@@ -350,7 +393,15 @@ function registerProtocolHandler() {
 
       // 1. API: /api/health
       if (rawPathname === '/api/health') {
-        const result = await sendIpcRequest('health', {});
+        const result = await sendIpcRequest('health', {}, 30000, 'read');
+        return new Response(JSON.stringify(result), {
+          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+        });
+      }
+
+      // 1b. API: /api/directions
+      if (rawPathname === '/api/directions') {
+        const result = await sendIpcRequest('directions', {}, 30000, 'read');
         return new Response(JSON.stringify(result), {
           headers: applySecurityHeaders({ 'content-type': 'application/json' }),
         });
@@ -359,7 +410,7 @@ function registerProtocolHandler() {
       // 2. API: /api/simulate
       if (rawPathname === '/api/simulate' && req.method === 'POST') {
         const body = await req.json().catch(() => ({}));
-        const result = await sendIpcRequest('simulate', body);
+        const result = await sendIpcRequest('simulate', body, 30000, 'reports:write');
         return new Response(JSON.stringify(result), {
           headers: applySecurityHeaders({ 'content-type': 'application/json' }),
         });
@@ -368,7 +419,7 @@ function registerProtocolHandler() {
       // 3. API: /api/calculate-signal-plan
       if (rawPathname === '/api/calculate-signal-plan' && req.method === 'POST') {
         const body = await req.json().catch(() => ({}));
-        const result = await sendIpcRequest('calculate-signal-plan', body);
+        const result = await sendIpcRequest('calculate-signal-plan', body, 30000, 'reports:write');
         return new Response(JSON.stringify(result), {
           headers: applySecurityHeaders({ 'content-type': 'application/json' }),
         });
@@ -378,7 +429,7 @@ function registerProtocolHandler() {
       const reportMatch = rawPathname.match(/^\/api\/reports\/([a-zA-Z0-9]+)$/);
       if (reportMatch) {
         const reportId = reportMatch[1];
-        const result = await sendIpcRequest('get-report', { report_id: reportId });
+        const result = await sendIpcRequest('get-report', { report_id: reportId }, 30000, 'read');
         return new Response(JSON.stringify(result), {
           headers: applySecurityHeaders({ 'content-type': 'application/json' }),
         });
@@ -389,7 +440,7 @@ function registerProtocolHandler() {
       if (cycleMatch && req.method === 'PUT') {
         const reportId = cycleMatch[1];
         const body = await req.json().catch(() => ({}));
-        const result = await sendIpcRequest('update-cycle', { report_id: reportId, ...body });
+        const result = await sendIpcRequest('update-cycle', { report_id: reportId, ...body }, 30000, 'reports:write');
         return new Response(JSON.stringify(result), {
           headers: applySecurityHeaders({ 'content-type': 'application/json' }),
         });
@@ -400,7 +451,7 @@ function registerProtocolHandler() {
       if (countsMatch && req.method === 'PUT') {
         const reportId = countsMatch[1];
         const body = await req.json().catch(() => ({}));
-        const result = await sendIpcRequest('update-counts', { report_id: reportId, ...body });
+        const result = await sendIpcRequest('update-counts', { report_id: reportId, ...body }, 30000, 'reports:write');
         return new Response(JSON.stringify(result), {
           headers: applySecurityHeaders({ 'content-type': 'application/json' }),
         });
@@ -493,7 +544,7 @@ function registerProtocolHandler() {
             green_budget: Math.max(40, Math.min(600, Number(formData.get('green_budget')) || 120)),
             yellow_seconds: Math.max(1, Math.min(10, Number(formData.get('yellow_seconds')) || 3)),
             use_cloud_ai: useCloudAi,
-          }, isVideo ? 60000 : 30000);
+          }, isVideo ? 60000 : 30000, 'inference:write');
 
           return new Response(JSON.stringify(result), {
             headers: applySecurityHeaders({ 'content-type': 'application/json' }),

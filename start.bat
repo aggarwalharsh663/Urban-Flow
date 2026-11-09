@@ -63,9 +63,9 @@ REM Launch Backend (R2: Secrets retrieved from DPAPI encrypted token file at res
 echo [START] Launching backend at http://127.0.0.1:8000
 start "Urban Flow - Backend" /D "%~dp0backend" cmd /k ""!VENV_PYTHON!" -m uvicorn main:app --host 127.0.0.1 --port 8000"
 
-REM Launch Frontend (R2: No secrets exposed in environment flags or command-line arguments)
+REM Launch Frontend (U-01: Provisions dev token via run-frontend.bat to avoid exposing secrets on command line)
 echo [START] Launching frontend at http://127.0.0.1:5174
-start "Urban Flow - Frontend" /D "%~dp0frontend" cmd /k "set VITE_API_URL=http://127.0.0.1:8000&& npm run dev -- --host 127.0.0.1 --port 5174 --strictPort"
+start "Urban Flow - Frontend" /D "%~dp0frontend" cmd /k "run-frontend.bat"
 
 echo.
 echo ============================================================

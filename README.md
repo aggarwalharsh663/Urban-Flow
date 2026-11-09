@@ -57,7 +57,7 @@ From the project root, open PowerShell and run the launcher:
 .\start-local.ps1
 ```
 
-On Windows, double-click `start.bat` in the project folder to start the frontend. It runs `frontend\run-frontend.bat` in the current window; keep that window open while using the app. The frontend opens at **http://127.0.0.1:5174** and targets the API at **http://127.0.0.1:8001**, so it does not use another Urban Flow instance on the default ports.
+On Windows, double-click `start.bat` in the project folder to start both the backend and frontend. The frontend opens at **http://127.0.0.1:5174** and targets the API at **http://127.0.0.1:8000**. The launcher automatically decrypts and passes the per-install local dev token to the frontend environment without committing secrets to version control.
 
 ```powershell
 .\backend\setup.ps1
@@ -121,13 +121,13 @@ In a second terminal:
 
 ```powershell
 cd frontend
-$env:VITE_API_URL = "http://127.0.0.1:8001"
+$env:VITE_API_URL = "http://127.0.0.1:8000"
+# Provision the local dev API token from the Python security module:
+$env:VITE_API_TOKEN = & python -c "import sys; sys.path.insert(0, '../backend'); import security_config; print(security_config.get_or_create_api_token())"
 npm run dev -- --host 127.0.0.1 --port 5174 --strictPort
 ```
 
-Open **http://127.0.0.1:5174**. The frontend expects its backend at **http://127.0.0.1:8001**. The website retries the API connection every five seconds. If a server is stopped, close its terminal and run the corresponding launcher again.
-
-If the frontend API server is not on `http://127.0.0.1:8000`, set `VITE_API_URL` in the frontend environment before starting Vite. Restart Vite after changing environment variables.
+Open **http://127.0.0.1:5174**. The frontend expects its backend at **http://127.0.0.1:8000**. The website retries the API connection every five seconds. The development server dynamically retrieves the per-install API token through local backend scripts (`start.bat` or `run-frontend.bat`), ensuring full API authentication without hardcoding or committing secrets into source control.
 
 Use the header control to switch between dark and light views. The preference is stored in this browser. The supplied UrbanFlow wordmark is kept locally in `frontend/public/`, with a light-background version and a recolored transparent version for dark mode.
 

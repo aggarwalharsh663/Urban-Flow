@@ -32,7 +32,12 @@ function safeDecodeURI(uri) {
   return current;
 }
 
-function resolveContainedPath(baseDir, requestedPath, allowedExtensions) {
+function resolveContainedPath(baseDir, requestedPath, allowedExtensions = null) {
+  // Fail-closed if allowedExtensions is omitted, null, empty, or not a Set (Item 3)
+  if (!allowedExtensions || !(allowedExtensions instanceof Set) || allowedExtensions.size === 0) {
+    return null;
+  }
+
   const decoded = safeDecodeURI(requestedPath);
   if (decoded === null) return null;
   if (/[\0\x00-\x1f\\]/.test(decoded)) return null;
@@ -54,7 +59,7 @@ function resolveContainedPath(baseDir, requestedPath, allowedExtensions) {
   }
 
   const ext = path.extname(resolved).toLowerCase();
-  if (allowedExtensions && !allowedExtensions.has(ext)) {
+  if (!allowedExtensions.has(ext)) {
     return null;
   }
 
@@ -116,6 +121,12 @@ const legitimate = resolveContainedPath(CLIENT_DIR, 'robots.txt', ALLOWED_CLIENT
 assert.notEqual(legitimate, null, 'Legitimate asset within CLIENT_DIR must resolve');
 console.log('✔ Legitimate asset resolved safely');
 
+// Test 7b: Default fail-closed when allowedExtensions omitted/null/empty (Item 3 Hardening)
+assert.equal(resolveContainedPath(CLIENT_DIR, 'robots.txt'), null, 'Omitted allowedExtensions must fail-closed and return null');
+assert.equal(resolveContainedPath(CLIENT_DIR, 'robots.txt', null), null, 'Null allowedExtensions must fail-closed and return null');
+assert.equal(resolveContainedPath(CLIENT_DIR, 'robots.txt', new Set()), null, 'Empty allowedExtensions set must fail-closed and return null');
+console.log('✔ Fail-closed path traversal defaults verified');
+
 // Test 8: Magic bytes verification for PNG
 const realPngHeader = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00]);
 assert.equal(verifyMagicBytes(realPngHeader, '.png'), true, 'Real PNG header should pass');
@@ -169,5 +180,11 @@ console.log('✔ Device permissions denial policy verified');
 assert.equal(mainContent.includes("'cross-origin-opener-policy': 'same-origin'"), true, 'main.cjs must specify COOP same-origin');
 assert.equal(mainContent.includes("'cross-origin-resource-policy': 'same-origin'"), true, 'main.cjs must specify CORP same-origin');
 console.log('✔ Cross-Origin Opener & Resource Policy headers verified');
+
+// Test 16: Verify IPC worker token and action scopes configured in main.cjs (U-02)
+assert.equal(mainContent.includes('IPC_SESSION_TOKEN'), true, 'main.cjs must generate IPC_SESSION_TOKEN');
+assert.equal(mainContent.includes('ACTION_SCOPES'), true, 'main.cjs must define ACTION_SCOPES');
+assert.equal(mainContent.includes('URBAN_FLOW_IPC_TOKEN'), true, 'main.cjs must pass URBAN_FLOW_IPC_TOKEN to worker');
+console.log('✔ IPC worker session token and action scopes verified');
 
 console.log('--- ALL ELECTRON SECURITY TESTS PASSED ---');
