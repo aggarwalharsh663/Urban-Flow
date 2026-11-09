@@ -258,8 +258,95 @@ def verify_api_token(candidate: Optional[str]) -> bool:
     """Constant-time token verification to prevent timing attacks."""
     if not candidate:
         return False
-    expected = get_or_create_api_token()
-    return secrets.compare_digest(candidate.strip(), expected.strip())
+    candidate = candidate.strip()
+    expected = get_or_create_api_token().strip()
+    if secrets.compare_digest(candidate, expected):
+        return True
+    # Also valid if it matches any active scoped token
+    return bool(get_token_scopes(candidate))
+
+
+# --- Scoped Authorization Model (R1) ---
+SCOPE_READ = "read"
+SCOPE_REPORTS_WRITE = "reports:write"
+SCOPE_INFERENCE_WRITE = "inference:write"
+SCOPE_ADMIN = "admin"
+ALL_SCOPES = {SCOPE_READ, SCOPE_REPORTS_WRITE, SCOPE_INFERENCE_WRITE, SCOPE_ADMIN}
+
+
+def generate_scoped_token(scope: str) -> str:
+    """
+    Derive a cryptographically tied token strictly limited to the specified scope.
+    Uses HMAC-SHA256 with the master per-install secret as key.
+    """
+    import hmac
+    if scope not in ALL_SCOPES:
+        raise ValueError(f"Invalid authorization scope: {scope}")
+    master = get_or_create_api_token().encode("utf-8")
+    sig = hmac.new(master, f"scope:{scope}".encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"uf_{scope[:4]}_{sig[:32]}"
+
+
+def get_token_scopes(candidate: Optional[str]) -> set[str]:
+    """
+    Return the set of authorization scopes granted to the candidate token.
+    Master token inherently holds ALL_SCOPES.
+    """
+    if not candidate:
+        return set()
+    candidate = candidate.strip()
+    master = get_or_create_api_token().strip()
+    if secrets.compare_digest(candidate, master):
+        return set(ALL_SCOPES)
+
+    for scope in ALL_SCOPES:
+        scoped = generate_scoped_token(scope)
+        if secrets.compare_digest(candidate, scoped):
+            if scope in {SCOPE_REPORTS_WRITE, SCOPE_INFERENCE_WRITE, SCOPE_ADMIN}:
+                return {scope, SCOPE_READ}
+            return {scope}
+
+    return set()
+
+
+def verify_token_scope(candidate: Optional[str], required_scope: str) -> bool:
+    """Verify token validity and required scope in constant time."""
+    if not candidate or not required_scope:
+        return False
+    scopes = get_token_scopes(candidate)
+    return required_scope in scopes
+
+
+# --- Media Preview Tickets (R2, R3) ---
+def generate_media_ticket(filename: str, expires_in_seconds: int = 300) -> str:
+    """
+    Generate a short-lived HMAC media ticket for a specific file,
+    eliminating raw master API token disclosure in URLs or browser history.
+    """
+    import hmac
+    master = get_or_create_api_token().encode("utf-8")
+    expiry = int(time.time()) + expires_in_seconds
+    payload = f"{filename}:{expiry}"
+    sig = hmac.new(master, payload.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    return f"{expiry}_{sig}"
+
+
+def verify_media_ticket(filename: str, ticket: Optional[str]) -> bool:
+    """Verify short-lived media ticket in constant time."""
+    if not ticket or "_" not in ticket:
+        return False
+    import hmac
+    try:
+        expiry_str, sig = ticket.split("_", 1)
+        expiry = int(expiry_str)
+        if time.time() > expiry:
+            return False
+        master = get_or_create_api_token().encode("utf-8")
+        payload = f"{filename}:{expiry}"
+        expected_sig = hmac.new(master, payload.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+        return secrets.compare_digest(sig, expected_sig)
+    except Exception:
+        return False
 
 
 # --- 2. CORS & Origin Validation ---
@@ -294,6 +381,31 @@ def get_allowed_origins() -> list[str]:
         origins.append(origin)
 
     return origins if origins else list(DEFAULT_ALLOWED_ORIGINS)
+
+
+# --- Host Header Validation (R5 Part B) ---
+DEFAULT_ALLOWED_HOSTS = [
+    "127.0.0.1:8000",
+    "localhost:8000",
+    "127.0.0.1:5174",
+    "localhost:5174",
+    "127.0.0.1",
+    "localhost",
+    "testserver",
+]
+
+
+def get_allowed_hosts() -> set[str]:
+    """Return explicit allowed Host headers for local server protection."""
+    configured = os.getenv("ALLOWED_HOSTS", "").strip()
+    if not configured:
+        return set(DEFAULT_ALLOWED_HOSTS)
+    hosts = set()
+    for h in configured.split(","):
+        clean = h.strip().lower()
+        if clean:
+            hosts.add(clean)
+    return hosts or set(DEFAULT_ALLOWED_HOSTS)
 
 
 # --- 3. Magic Bytes File Validation ---
@@ -735,55 +847,237 @@ def save_report_atomic(report: dict, report_dir: Path, source_channel: str = "ap
     return report
 
 
-# --- 8. Storage Retention & Automated Cleanup ---
-def cleanup_storage(upload_dir: Path, report_dir: Path) -> dict[str, int]:
+# --- 8. Storage Accounting, Retention & Quota Enforcement (R4) ---
+def _is_safe_path(base_dir: Path, target: Path) -> bool:
+    try:
+        resolved = target.resolve()
+        return resolved.is_relative_to(base_dir.resolve())
+    except Exception:
+        return False
+
+
+def calculate_storage_usage(dirs: Optional[list[Path]] = None) -> int:
     """
-    Cleans up expired uploads and reports according to retention policies.
-    Guarantees storage remains bounded.
+    Calculate actual file sizes in managed storage directories.
+    Avoids counting directories, ignores external symlinks, and safely handles missing paths.
     """
+    if dirs is None:
+        dirs = [BASE_DIR / "uploads", BASE_DIR / "reports", BASE_DIR / "data"]
+
+    total = 0
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        try:
+            for item in d.glob("*"):
+                if not item.is_file() or item.name == ".gitkeep":
+                    continue
+                if item.is_symlink() and not _is_safe_path(d, item):
+                    continue
+                try:
+                    total += item.stat().st_size
+                except (OSError, FileNotFoundError):
+                    pass
+        except Exception as e:
+            logger.debug("Error calculating storage in %s: %s", d, e)
+    return total
+
+
+class StorageManager:
+    """
+    Manages disk space accounting, concurrent reservations, and enforcement
+    of the 500 MB application storage cap (R4).
+    """
+
+    def __init__(
+        self,
+        upload_dir: Optional[Path] = None,
+        report_dir: Optional[Path] = None,
+        max_bytes: int = MAX_STORAGE_BYTES,
+    ):
+        self.upload_dir = upload_dir or (BASE_DIR / "uploads")
+        self.report_dir = report_dir or (BASE_DIR / "reports")
+        self.max_bytes = max_bytes
+        self._lock = threading.Lock()
+        self._reservations: dict[str, int] = {}
+        self._active_files: set[str] = set()
+
+    def get_tracked_dirs(self) -> list[Path]:
+        return [self.upload_dir, self.report_dir, BASE_DIR / "data"]
+
+    def calculate_usage(self) -> int:
+        return calculate_storage_usage(self.get_tracked_dirs())
+
+    def get_status(self) -> dict:
+        used = self.calculate_usage()
+        with self._lock:
+            reserved = sum(self._reservations.values())
+        effective_used = min(self.max_bytes, used + reserved)
+        available = max(0, self.max_bytes - effective_used)
+        pct = round((used / self.max_bytes) * 100, 2) if self.max_bytes > 0 else 0.0
+
+        uploads_count = 0
+        if self.upload_dir.is_dir():
+            uploads_count = sum(1 for p in self.upload_dir.glob("*") if p.is_file() and p.name != ".gitkeep")
+        reports_count = 0
+        if self.report_dir.is_dir():
+            reports_count = sum(1 for p in self.report_dir.glob("*.json") if p.is_file())
+
+        return {
+            "total_used_bytes": used,
+            "reserved_bytes": reserved,
+            "max_allowed_bytes": self.max_bytes,
+            "available_bytes": available,
+            "usage_percentage": pct,
+            "uploads_count": uploads_count,
+            "reports_count": reports_count,
+        }
+
+    def reserve(self, amount_bytes: int) -> tuple[bool, Optional[str]]:
+        """
+        Attempt to reserve storage capacity before accepting or writing files.
+        If capacity is insufficient, triggers automated storage cleanup.
+        Returns (is_allowed, reservation_id).
+        """
+        if amount_bytes <= 0:
+            return True, None
+        if amount_bytes > self.max_bytes:
+            return False, None
+
+        with self._lock:
+            current_used = self.calculate_usage()
+            current_reserved = sum(self._reservations.values())
+
+            if (current_used + current_reserved + amount_bytes) > self.max_bytes:
+                # Trigger cleanup to free space
+                cleanup_storage(
+                    self.upload_dir,
+                    self.report_dir,
+                    target_free_bytes=amount_bytes,
+                    active_files=self._active_files,
+                    max_bytes=self.max_bytes,
+                )
+                current_used = self.calculate_usage()
+                if (current_used + current_reserved + amount_bytes) > self.max_bytes:
+                    logger.warning(
+                        "Storage quota exceeded: requested %d bytes, current used %d, max %d",
+                        amount_bytes, current_used, self.max_bytes,
+                    )
+                    return False, None
+
+            res_id = secrets.token_hex(8)
+            self._reservations[res_id] = amount_bytes
+            return True, res_id
+
+    def release(self, reservation_id: Optional[str]):
+        if not reservation_id:
+            return
+        with self._lock:
+            self._reservations.pop(reservation_id, None)
+
+    def mark_active(self, filepath: Path):
+        with self._lock:
+            self._active_files.add(str(filepath.resolve()))
+
+    def unmark_active(self, filepath: Path):
+        with self._lock:
+            self._active_files.discard(str(filepath.resolve()))
+
+
+def cleanup_storage(
+    upload_dir: Path,
+    report_dir: Path,
+    target_free_bytes: int = 0,
+    active_files: Optional[set[str]] = None,
+    max_bytes: int = MAX_STORAGE_BYTES,
+) -> dict[str, Any]:
+    """
+    Cleans up expired uploads and reports according to retention policies,
+    and evicts oldest eligible non-expired files if needed to enforce the 500 MB storage cap.
+    Guarantees active processing files are never deleted.
+    """
+    active = active_files or set()
     now = time.time()
     upload_threshold = now - (UPLOAD_RETENTION_HOURS * 3600)
     report_threshold = now - (REPORT_RETENTION_HOURS * 3600)
     deleted_uploads = 0
     deleted_reports = 0
+    freed_bytes = 0
 
     # 1. Clean expired uploads
     if upload_dir.is_dir():
         for item in upload_dir.glob("*"):
-            if item.is_file() and item.name != ".gitkeep":
+            if item.is_file() and item.name != ".gitkeep" and str(item.resolve()) not in active:
                 try:
-                    if item.stat().st_mtime < upload_threshold:
+                    st = item.stat()
+                    if st.st_mtime < upload_threshold:
+                        size = st.st_size
                         item.unlink(missing_ok=True)
                         deleted_uploads += 1
+                        freed_bytes += size
                 except Exception as e:
                     logger.debug("Could not delete upload %s: %s", item, e)
 
     # 2. Clean expired reports
     if report_dir.is_dir():
         report_files = sorted(
-            [p for p in report_dir.glob("*.json") if p.is_file()],
+            [p for p in report_dir.glob("*.json") if p.is_file() and str(p.resolve()) not in active],
             key=lambda p: p.stat().st_mtime,
         )
         for item in report_files:
             try:
-                if item.stat().st_mtime < report_threshold:
+                st = item.stat()
+                if st.st_mtime < report_threshold:
+                    size = st.st_size
                     item.unlink(missing_ok=True)
                     deleted_reports += 1
+                    freed_bytes += size
             except Exception as e:
                 logger.debug("Could not delete report %s: %s", item, e)
 
         # Enforce max report count
         remaining_reports = sorted(
-            [p for p in report_dir.glob("*.json") if p.is_file()],
+            [p for p in report_dir.glob("*.json") if p.is_file() and str(p.resolve()) not in active],
             key=lambda p: p.stat().st_mtime,
         )
         if len(remaining_reports) > MAX_REPORTS_COUNT:
             excess = len(remaining_reports) - MAX_REPORTS_COUNT
             for item in remaining_reports[:excess]:
                 try:
+                    size = item.stat().st_size
                     item.unlink(missing_ok=True)
                     deleted_reports += 1
+                    freed_bytes += size
                 except Exception:
                     pass
 
-    return {"deleted_uploads": deleted_uploads, "deleted_reports": deleted_reports}
+    # 3. If storage still exceeds MAX_STORAGE_BYTES or target_free_bytes > 0:
+    # Evict oldest uploads first
+    current_total = calculate_storage_usage([upload_dir, report_dir, BASE_DIR / "data"])
+    max_threshold = max_bytes - target_free_bytes
+    if current_total > max_threshold and upload_dir.is_dir():
+        candidate_uploads = sorted(
+            [p for p in upload_dir.glob("*") if p.is_file() and p.name != ".gitkeep" and str(p.resolve()) not in active],
+            key=lambda p: p.stat().st_mtime,
+        )
+        for item in candidate_uploads:
+            if current_total <= max_threshold:
+                break
+            try:
+                size = item.stat().st_size
+                item.unlink(missing_ok=True)
+                deleted_uploads += 1
+                freed_bytes += size
+                current_total -= size
+            except Exception:
+                pass
+
+    return {
+        "deleted_uploads": deleted_uploads,
+        "deleted_reports": deleted_reports,
+        "freed_bytes": freed_bytes,
+        "current_usage_bytes": calculate_storage_usage([upload_dir, report_dir, BASE_DIR / "data"]),
+    }
+
+
+GLOBAL_STORAGE_MANAGER = StorageManager()

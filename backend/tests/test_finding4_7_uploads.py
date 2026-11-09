@@ -124,7 +124,12 @@ def test_serve_upload_security_headers():
     (UPLOAD_DIR / test_filename).write_bytes(real_png)
 
     try:
-        response = client.get(f"/uploads/{test_filename}")
+        # Unauthenticated access must fail with 401 (R3)
+        unauth_resp = client.get(f"/uploads/{test_filename}")
+        assert unauth_resp.status_code == 401
+
+        # Authenticated access succeeds and includes safe security headers
+        response = client.get(f"/uploads/{test_filename}", headers=AUTH_HEADERS)
         assert response.status_code == 200
         assert response.headers.get("x-content-type-options") == "nosniff"
         assert "sandbox" in response.headers.get("content-security-policy", "")

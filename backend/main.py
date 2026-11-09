@@ -28,21 +28,30 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from security_config import (
+    ALL_SCOPES,
     ALLOWED_EXTENSIONS,
     ALLOWED_IMAGE_EXTENSIONS,
     ALLOWED_VIDEO_EXTENSIONS,
     GLOBAL_INFERENCE_MANAGER,
     GLOBAL_RATE_LIMITER,
+    GLOBAL_STORAGE_MANAGER,
     INFERENCE_TIMEOUT_SECONDS_IMAGE,
     INFERENCE_TIMEOUT_SECONDS_VIDEO,
     MAX_IMAGE_HEIGHT,
     MAX_IMAGE_WIDTH,
     MAX_JUNCTION_NAME_LENGTH,
+    MAX_STORAGE_BYTES,
     MAX_UPLOAD_SIZE_BYTES,
     MAX_VEHICLE_COUNT,
     RATE_LIMIT_DEFAULTS,
+    SCOPE_ADMIN,
+    SCOPE_INFERENCE_WRITE,
+    SCOPE_READ,
+    SCOPE_REPORTS_WRITE,
     cleanup_storage,
+    get_allowed_hosts,
     get_allowed_origins,
+    get_token_scopes,
     read_report_atomic,
     sanitize_junction_name,
     save_report_atomic,
@@ -51,6 +60,8 @@ from security_config import (
     validate_video_file,
     verify_api_token,
     verify_magic_bytes,
+    verify_media_ticket,
+    verify_token_scope,
 )
 from services.detection import (
     ModelUnavailableError,
@@ -102,6 +113,17 @@ app.add_middleware(
 # 2. Security Headers & CSRF / Origin Validation Middleware (Finding 1 & 9)
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
+    # Host header validation for local server protection (R5 Part B)
+    host_header = request.headers.get("host")
+    if host_header:
+        norm_host = host_header.strip().lower()
+        if norm_host not in get_allowed_hosts():
+            LOGGER.warning("Rejected request with unauthorized Host header: %s", host_header)
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"detail": "Bad Request: Invalid Host header."},
+            )
+
     # Origin verification for state-changing requests if Origin header is present
     if request.method in {"POST", "PUT", "DELETE"}:
         origin = request.headers.get("origin")
@@ -136,28 +158,24 @@ async def security_middleware(request: Request, call_next):
     return response
 
 
-# 3. Authentication Dependency (Finding 1 & 3)
+# 3. Authentication & Scoped Authorization Dependencies (R1 & R2)
 async def require_auth(
     request: Request,
     x_api_token: Annotated[Optional[str], Header()] = None,
     authorization: Annotated[Optional[str], Header()] = None,
-    api_token: Annotated[Optional[str], Query()] = None,
 ) -> str:
     """
-    Enforces per-install / per-launch token authentication.
-    Checks:
+    Enforces per-install token authentication.
+    Accepts credentials strictly via protected request headers:
       1. X-API-Token header
       2. Authorization: Bearer <token>
-      3. api_token query parameter (for media previews)
+    Query-string token authentication is completely removed from API endpoints (R2).
     """
     candidate = x_api_token
     if not candidate and authorization:
         parts = authorization.strip().split()
         if len(parts) == 2 and parts[0].lower() == "bearer":
             candidate = parts[1]
-    # Restrict query parameter token strictly to GET requests to prevent sensitive token leakage in POST/PUT URLs
-    if not candidate and request.method == "GET":
-        candidate = api_token
 
     if not candidate or not verify_api_token(candidate):
         LOGGER.warning("Authentication failure for %s %s from %s", request.method, request.url.path, request.client.host if request.client else "unknown")
@@ -167,6 +185,26 @@ async def require_auth(
             headers={"WWW-Authenticate": "Bearer"},
         )
     return candidate
+
+
+def require_scope(required_scope: str):
+    """
+    Enforces scoped authorization (R1).
+    Validates that the presented token holds the required permission scope.
+    """
+    async def _check_scope(
+        request: Request,
+        token: Annotated[str, Depends(require_auth)],
+    ) -> str:
+        scopes = get_token_scopes(token)
+        if required_scope not in scopes:
+            LOGGER.warning("Token lacks required scope '%s' on %s", required_scope, request.url.path)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Forbidden: Token lacks required scope '{required_scope}'.",
+            )
+        return token
+    return _check_scope
 
 
 # 4. Rate Limiting Helper (Finding 5)
@@ -247,9 +285,18 @@ async def _store_upload(file: UploadFile, allowed_suffixes: set[str]) -> tuple[P
     destination = UPLOAD_DIR / filename
     temp_destination = UPLOAD_DIR / f".tmp_{filename}"
 
+    # Reserve initial capacity under 500 MB storage budget (R4)
+    reserved, res_id = GLOBAL_STORAGE_MANAGER.reserve(min(MAX_UPLOAD_SIZE_BYTES, 10 * 1024 * 1024))
+    if not reserved:
+        raise HTTPException(
+            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+            detail="Storage quota exceeded (500 MB limit reached). Automatic cleanup was unable to free enough space.",
+        )
+
     size = 0
     header_bytes = bytearray()
     try:
+        GLOBAL_STORAGE_MANAGER.mark_active(temp_destination)
         with temp_destination.open("wb") as output:
             while chunk := await file.read(64 * 1024):  # 64 KB chunks
                 size += len(chunk)
@@ -257,6 +304,11 @@ async def _store_upload(file: UploadFile, allowed_suffixes: set[str]) -> tuple[P
                     raise HTTPException(
                         status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                         detail="Upload exceeds the 100 MB limit.",
+                    )
+                if GLOBAL_STORAGE_MANAGER.calculate_usage() + size > MAX_STORAGE_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+                        detail="Storage quota exceeded (500 MB limit reached).",
                     )
                 if len(header_bytes) < 32:
                     header_bytes.extend(chunk[: 32 - len(header_bytes)])
@@ -292,24 +344,48 @@ async def _store_upload(file: UploadFile, allowed_suffixes: set[str]) -> tuple[P
         destination.unlink(missing_ok=True)
         raise
     finally:
+        GLOBAL_STORAGE_MANAGER.unmark_active(temp_destination)
+        GLOBAL_STORAGE_MANAGER.release(res_id)
         await file.close()
 
     return destination, filename
 
 
-# 7. Secure Upload Serving Endpoint (Finding 4: Stored XSS Protection)
+# 7. Secure Upload Serving Endpoint (R3, R2: Protected Media Serving)
 @app.get("/uploads/{filename}")
-async def serve_upload(filename: str):
+async def serve_upload(
+    filename: str,
+    request: Request,
+    x_api_token: Annotated[Optional[str], Header()] = None,
+    authorization: Annotated[Optional[str], Header()] = None,
+    ticket: Annotated[Optional[str], Query()] = None,
+):
     """
-    Secure static upload file server.
-    Only serves allowed images and videos with nosniff and CSP headers.
-    Completely blocks HTML, SVG, or executable execution in the application context.
+    Secure static upload file server (R3).
+    Requires either:
+      1. Header authentication (X-API-Token or Bearer token) with read scope, or
+      2. Short-lived HMAC media ticket via query parameter for safe web <img> rendering (R2).
     """
-    # Strict filename format: uuid + allowed extension
+    # Strict filename format check first: only media extensions are eligible (R3)
     pattern = r"^[a-zA-Z0-9_-]+(\.(jpg|jpeg|png|mp4))$"
     match = re.match(pattern, filename.lower())
     if not match:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found.")
+
+    token = x_api_token
+    if not token and authorization:
+        parts = authorization.strip().split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            token = parts[1]
+
+    has_auth = bool(token and verify_token_scope(token, SCOPE_READ))
+    has_ticket = bool(ticket and verify_media_ticket(filename, ticket))
+
+    if not has_auth and not has_ticket:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized: Access to media requires valid authentication or a media ticket.",
+        )
 
     file_path = (UPLOAD_DIR / filename).resolve()
     # Path containment check
@@ -338,10 +414,30 @@ async def serve_upload(filename: str):
 # 8. API Endpoints
 
 @app.get("/api/health")
-def health() -> dict:
+def health(
+    request: Request,
+    x_api_token: Annotated[Optional[str], Header()] = None,
+    authorization: Annotated[Optional[str], Header()] = None,
+) -> dict:
     """
-    Health check endpoint (Finding 8: No internal paths or usernames disclosed).
+    Health check endpoint (R3 & R4).
+    Unauthenticated probes receive minimal status without disclosing internals.
+    Authenticated requests receive complete diagnostics and safe storage metrics.
     """
+    token = x_api_token
+    if not token and authorization:
+        parts = authorization.strip().split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            token = parts[1]
+
+    if not token or not verify_api_token(token):
+        return {
+            "app": "urban_flow",
+            "status": "ok",
+            "privacy_mode": "local_default",
+            "storage": "local",
+        }
+
     det = get_detection_status()
     gem = get_gemini_status()
     return {
@@ -350,10 +446,10 @@ def health() -> dict:
         "computer_vision_ready": det["computer_vision_ready"],
         "missing_dependencies": det.get("missing_dependencies", []),
         "model_available": det["model_available"],
-        "model_name": det.get("model_name"),  # Filename only (e.g. yolov8m.pt), NOT absolute path
+        "model_name": det.get("model_name"),
         "gemini_available": gem["gemini_available"],
         "privacy_mode": "local_default",
-        "storage": "local",
+        "storage": GLOBAL_STORAGE_MANAGER.get_status(),
     }
 
 
@@ -361,7 +457,7 @@ def health() -> dict:
 def calculate_plan(
     payload: CountsInput,
     request: Request,
-    auth_token: Annotated[str, Depends(require_auth)],
+    auth_token: Annotated[str, Depends(require_scope(SCOPE_REPORTS_WRITE))],
 ) -> dict:
     enforce_rate_limit(request, category="simulate")
     counts = _validate_counts(payload.counts)
@@ -379,7 +475,7 @@ def calculate_plan(
 def simulate(
     payload: CountsInput,
     request: Request,
-    auth_token: Annotated[str, Depends(require_auth)],
+    auth_token: Annotated[str, Depends(require_scope(SCOPE_REPORTS_WRITE))],
 ) -> dict:
     enforce_rate_limit(request, category="simulate")
     counts = _validate_counts(payload.counts)
@@ -506,7 +602,7 @@ async def _analyse(
 @app.post("/api/analyse-image")
 async def analyse_image_endpoint(
     request: Request,
-    auth_token: Annotated[str, Depends(require_auth)],
+    auth_token: Annotated[str, Depends(require_scope(SCOPE_INFERENCE_WRITE))],
     file: Annotated[UploadFile, File(...)],
     junction_name: Annotated[str | None, Form()] = None,
     green_budget: Annotated[int, Form()] = DEFAULT_GREEN_BUDGET,
@@ -530,7 +626,7 @@ async def analyse_image_endpoint(
 @app.post("/api/analyse-video")
 async def analyse_video_endpoint(
     request: Request,
-    auth_token: Annotated[str, Depends(require_auth)],
+    auth_token: Annotated[str, Depends(require_scope(SCOPE_INFERENCE_WRITE))],
     file: Annotated[UploadFile, File(...)],
     junction_name: Annotated[str | None, Form()] = None,
     green_budget: Annotated[int, Form()] = DEFAULT_GREEN_BUDGET,
@@ -555,7 +651,7 @@ async def analyse_video_endpoint(
 def get_report(
     report_id: str,
     request: Request,
-    auth_token: Annotated[str, Depends(require_auth)],
+    auth_token: Annotated[str, Depends(require_scope(SCOPE_READ))],
 ) -> dict:
     enforce_rate_limit(request, category="reports")
     if not report_id.isalnum():
@@ -571,7 +667,7 @@ def update_report_cycle(
     report_id: str,
     payload: CycleUpdateInput,
     request: Request,
-    auth_token: Annotated[str, Depends(require_auth)],
+    auth_token: Annotated[str, Depends(require_scope(SCOPE_REPORTS_WRITE))],
 ) -> dict:
     enforce_rate_limit(request, category="reports")
     if not report_id.isalnum():
@@ -605,7 +701,7 @@ def update_report_counts(
     report_id: str,
     payload: CountsInput,
     request: Request,
-    auth_token: Annotated[str, Depends(require_auth)],
+    auth_token: Annotated[str, Depends(require_scope(SCOPE_REPORTS_WRITE))],
 ) -> dict:
     enforce_rate_limit(request, category="reports")
     if not report_id.isalnum():
@@ -642,5 +738,9 @@ def update_report_counts(
 
 
 @app.get("/api/directions")
-def get_directions() -> dict:
+def get_directions(
+    request: Request,
+    auth_token: Annotated[str, Depends(require_scope(SCOPE_READ))],
+) -> dict:
+    enforce_rate_limit(request, category="general")
     return {"directions": list(DIRECTIONS)}

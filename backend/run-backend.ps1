@@ -1,7 +1,9 @@
-param(
-    [switch]$Dev = $false
-)
-
+<#
+.SYNOPSIS
+    Production backend launcher for Urban Flow (R7).
+    Executes FastAPI under strict production hardening parameters.
+    Development flags such as --reload are strictly disallowed in this launcher.
+#>
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
 
@@ -28,7 +30,7 @@ if ($LASTEXITCODE -ne 0) {
     throw "OpenCV/Ultralytics could not be imported from backend\.venv. Review the setup output above."
 }
 
-Write-Host "Starting FastAPI at http://127.0.0.1:8000"
+Write-Host "Starting FastAPI in Production Mode at http://127.0.0.1:8000"
 $ModelFile = @("yolov8m.pt", "yolov8s.pt", "yolov8n.pt") |
     Where-Object { Test-Path (Join-Path $PSScriptRoot $_) } |
     Select-Object -First 1
@@ -37,13 +39,11 @@ if ($ModelFile) {
 } else {
     Write-Host "No YOLO weights found. Add yolov8m.pt, yolov8s.pt, or yolov8n.pt to backend\."
 }
-$UvicornArgs = @("main:app", "--host", "127.0.0.1", "--port", "8000")
-if ($Dev) {
-    Write-Host "Development mode enabled (--reload active)"
-    $UvicornArgs += @("--reload")
-} else {
-    Write-Host "Production mode active (secure non-reload execution)"
-}
+
+# Production execution parameters (R7: strictly non-reload, bound to loopback only)
+$UvicornArgs = @("main:app", "--host", "127.0.0.1", "--port", "8000", "--no-server-header")
+Write-Host "Production mode active (secure non-reload execution)"
+
 & $BackendPython -m uvicorn @UvicornArgs
 if ($LASTEXITCODE -ne 0) {
     throw "FastAPI stopped with exit code $LASTEXITCODE. Check whether port 8000 is already in use."

@@ -60,6 +60,13 @@ def _response_schema() -> dict:
 
 
 def _prepare_frame(frame):
+    # On-device privacy redaction before any cloud transmission (R5 Part A)
+    from services.privacy import PrivacyRedactionError, redact_frame_for_cloud
+    try:
+        frame, _ = redact_frame_for_cloud(frame)
+    except PrivacyRedactionError as e:
+        raise GeminiAnalysisError(f"Privacy redaction failed before cloud upload: {e}") from e
+
     height, width = frame.shape[:2]
     scale = min(1.0, MAX_IMAGE_EDGE / max(height, width))
     if scale < 1:

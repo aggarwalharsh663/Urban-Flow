@@ -22,7 +22,9 @@ from security_config import (
     ALLOWED_EXTENSIONS,
     ALLOWED_IMAGE_EXTENSIONS,
     ALLOWED_VIDEO_EXTENSIONS,
+    GLOBAL_STORAGE_MANAGER,
     MAX_JUNCTION_NAME_LENGTH,
+    MAX_STORAGE_BYTES,
     MAX_UPLOAD_SIZE_BYTES,
     MAX_VEHICLE_COUNT,
     cleanup_storage,
@@ -94,10 +96,10 @@ def handle_health(data: dict) -> dict:
         "computer_vision_ready": det["computer_vision_ready"],
         "missing_dependencies": det.get("missing_dependencies", []),
         "model_available": det["model_available"],
-        "model_name": det.get("model_name"),  # Filename only, no absolute filesystem paths
+        "model_name": det.get("model_name"),
         "gemini_available": gem["gemini_available"],
         "privacy_mode": "local_default",
-        "storage": "local",
+        "storage": GLOBAL_STORAGE_MANAGER.get_status(),
     }
 
 
@@ -153,9 +155,15 @@ def handle_analyse(data: dict, video: bool = False) -> dict:
     if file_size == 0:
         raise ValueError("Uploaded file is empty.")
 
+    # Enforce 500 MB application storage cap (R4)
+    reserved, res_id = GLOBAL_STORAGE_MANAGER.reserve(file_size)
+    if not reserved:
+        raise ValueError("Storage quota exceeded (500 MB limit). Automatic cleanup could not free sufficient space.")
+
     suffix = src_path.suffix.lower()
     allowed = ALLOWED_VIDEO_EXTENSIONS if video else ALLOWED_IMAGE_EXTENSIONS
     if suffix not in allowed or suffix not in ALLOWED_EXTENSIONS:
+        GLOBAL_STORAGE_MANAGER.release(res_id)
         raise ValueError(f"Unsupported file type '{suffix}'. Use: {', '.join(sorted(allowed))}")
 
     # Verify magic bytes
@@ -220,9 +228,11 @@ def handle_analyse(data: dict, video: bool = False) -> dict:
         yellow_seconds=yellow_seconds,
         all_red_seconds=all_red_seconds,
     )
-    # Trigger cleanup
-    cleanup_storage(UPLOAD_DIR, REPORT_DIR)
-    return _save_report(report)
+    try:
+        cleanup_storage(UPLOAD_DIR, REPORT_DIR)
+        return _save_report(report)
+    finally:
+        GLOBAL_STORAGE_MANAGER.release(res_id)
 
 
 def handle_get_report(data: dict) -> dict:
@@ -305,6 +315,18 @@ def handle_update_counts(data: dict) -> dict:
     return _save_report(updated_report)
 
 
+CANCELLED_REQUESTS: set[str] = set()
+
+
+def handle_cancel(data: dict) -> dict:
+    """Handle task cancellation request from Electron (R6)."""
+    cancel_id = str(data.get("cancel_id", "")).strip()
+    if cancel_id:
+        CANCELLED_REQUESTS.add(cancel_id)
+        LOGGER.info("Registered cancellation for request ID: %s", cancel_id)
+    return {"cancelled": cancel_id}
+
+
 HANDLERS = {
     "health": handle_health,
     "simulate": handle_simulate,
@@ -314,6 +336,7 @@ HANDLERS = {
     "get-report": handle_get_report,
     "update-cycle": handle_update_cycle,
     "update-counts": handle_update_counts,
+    "cancel": handle_cancel,
 }
 
 
@@ -332,11 +355,20 @@ def main():
             action = req.get("action")
             data = req.get("data") or {}
 
+            if req_id and req_id in CANCELLED_REQUESTS:
+                CANCELLED_REQUESTS.remove(req_id)
+                LOGGER.info("Skipping execution of pre-cancelled request: %s", req_id)
+                continue
+
             handler = HANDLERS.get(action)
             if not handler:
                 resp = {"id": req_id, "ok": False, "error": f"Unknown action: {action}"}
             else:
                 result = handler(data)
+                if req_id and req_id in CANCELLED_REQUESTS:
+                    CANCELLED_REQUESTS.remove(req_id)
+                    LOGGER.info("Discarding result of cancelled request: %s", req_id)
+                    continue
                 resp = {"id": req_id, "ok": True, "result": result}
         except Exception as e:
             LOGGER.exception("Error processing request: %s", e)

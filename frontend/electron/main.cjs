@@ -279,6 +279,12 @@ function sendIpcRequest(action, data = {}, timeoutMs = 30000) {
     const timer = setTimeout(() => {
       if (pendingRequests.has(reqId)) {
         pendingRequests.delete(reqId);
+        // Cooperative cancellation signal to worker process (R6)
+        if (pythonProcess && !pythonProcess.killed) {
+          try {
+            pythonProcess.stdin.write(JSON.stringify({ id: crypto.randomUUID(), action: 'cancel', data: { cancel_id: reqId } }) + '\n');
+          } catch (e) {}
+        }
         reject(new Error(`Request '${action}' timed out after ${timeoutMs}ms.`));
       }
     }, timeoutMs);
@@ -293,24 +299,35 @@ function sendIpcRequest(action, data = {}, timeoutMs = 30000) {
   });
 }
 
-// Secure IPC handlers for ContextBridge Preload (SEC-RES-05)
-if (ipcMain) {
-  ipcMain.handle('get-api-token', async (event) => {
-    const origin = event.senderFrame ? event.senderFrame.url : '';
-    if (origin && !isAllowedOrigin(origin)) {
-      throw new Error('Unauthorized IPC sender origin');
-    }
-    return process.env.URBAN_FLOW_API_TOKEN || '';
-  });
+// Explicit Action Allowlist for IPC Worker Invocations (R2 & SEC-RES-05)
+const ALLOWED_IPC_ACTIONS = new Set([
+  'health',
+  'simulate',
+  'calculate-signal-plan',
+  'analyse-image',
+  'analyse-video',
+  'get-report',
+  'update-cycle',
+  'update-counts',
+  'cancel',
+]);
 
+// Secure IPC handlers for ContextBridge Preload (R2: Raw API token retrieval is completely eliminated)
+if (ipcMain) {
   ipcMain.handle('worker-request', async (event, payload) => {
     const origin = event.senderFrame ? event.senderFrame.url : '';
     if (origin && !isAllowedOrigin(origin)) {
+      log('Rejected IPC invocation from unauthorized origin:', origin);
       throw new Error('Unauthorized IPC sender origin');
     }
     const { action, data } = payload || {};
-    if (!action || typeof action !== 'string') {
-      throw new Error('Invalid IPC action');
+    if (!action || typeof action !== 'string' || !ALLOWED_IPC_ACTIONS.has(action)) {
+      log('Rejected unapproved IPC action:', action);
+      throw new Error('Forbidden or invalid IPC action: ' + action);
+    }
+    // Limit payload serialization size to 5 MB
+    if (data && JSON.stringify(data).length > 5 * 1024 * 1024) {
+      throw new Error('IPC request payload exceeds maximum limit of 5 MB.');
     }
     return sendIpcRequest(action, data || {});
   });
@@ -419,20 +436,54 @@ function registerProtocolHandler() {
           });
         }
 
-        const arrayBuffer = await file.arrayBuffer();
-        const fileBuffer = Buffer.from(arrayBuffer);
+        const tempName = `${crypto.randomUUID()}${ext}`;
+        const tempPath = path.join(UPLOAD_DIR, tempName);
+        const writeStream = fs.createWriteStream(tempPath);
+        const reader = file.stream().getReader();
 
-        // Verify magic bytes before saving (Finding 4 & 7)
-        if (!verifyMagicBytes(fileBuffer, ext)) {
+        let totalBytes = 0;
+        let headerChunk = null;
+        let streamFailed = false;
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const buf = Buffer.from(value);
+            if (!headerChunk) {
+              headerChunk = buf;
+              if (!verifyMagicBytes(headerChunk, ext)) {
+                streamFailed = true;
+                break;
+              }
+            }
+            totalBytes += buf.length;
+            if (totalBytes > MAX_UPLOAD_SIZE) {
+              streamFailed = true;
+              break;
+            }
+            writeStream.write(buf);
+          }
+          await new Promise((res, rej) => {
+            writeStream.end((err) => err ? rej(err) : res());
+          });
+        } catch (streamErr) {
+          streamFailed = true;
+        }
+
+        if (streamFailed || !headerChunk || !verifyMagicBytes(headerChunk, ext)) {
+          try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch (e) {}
+          if (totalBytes > MAX_UPLOAD_SIZE) {
+            return new Response(JSON.stringify({ detail: 'Upload exceeds 100 MB limit.' }), {
+              status: 413,
+              headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+            });
+          }
           return new Response(JSON.stringify({ detail: `File content does not match expected format for ${ext}.` }), {
             status: 400,
             headers: applySecurityHeaders({ 'content-type': 'application/json' }),
           });
         }
-
-        const tempName = `${crypto.randomUUID()}${ext}`;
-        const tempPath = path.join(UPLOAD_DIR, tempName);
-        fs.writeFileSync(tempPath, fileBuffer);
 
         try {
           const useCloudAi = formData.get('use_cloud_ai') === 'true';

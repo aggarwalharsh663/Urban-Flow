@@ -59,16 +59,13 @@ if not exist "%~dp0frontend\node_modules" (
     cd /d "%~dp0"
 )
 
-REM Generate or read API token securely
-for /f "tokens=*" %%t in ('"!VENV_PYTHON!" -c "import sys; sys.path.insert(0, r'%~dp0backend'); import security_config; print(security_config.get_or_create_api_token())"') do set "API_TOKEN=%%t"
-
-REM Launch Backend (Production settings without --reload)
+REM Launch Backend (R2: Secrets retrieved from DPAPI encrypted token file at rest; never passed on command line)
 echo [START] Launching backend at http://127.0.0.1:8000
-start "Urban Flow - Backend" /D "%~dp0backend" cmd /k "set URBAN_FLOW_API_TOKEN=!API_TOKEN!&& "!VENV_PYTHON!" -m uvicorn main:app --host 127.0.0.1 --port 8000"
+start "Urban Flow - Backend" /D "%~dp0backend" cmd /k ""!VENV_PYTHON!" -m uvicorn main:app --host 127.0.0.1 --port 8000"
 
-REM Launch Frontend
+REM Launch Frontend (R2: No secrets exposed in environment flags or command-line arguments)
 echo [START] Launching frontend at http://127.0.0.1:5174
-start "Urban Flow - Frontend" /D "%~dp0frontend" cmd /k "set VITE_API_URL=http://127.0.0.1:8000&& set VITE_API_TOKEN=!API_TOKEN!&& npm run dev -- --host 127.0.0.1 --port 5174 --strictPort"
+start "Urban Flow - Frontend" /D "%~dp0frontend" cmd /k "set VITE_API_URL=http://127.0.0.1:8000&& npm run dev -- --host 127.0.0.1 --port 5174 --strictPort"
 
 echo.
 echo ============================================================

@@ -19,10 +19,12 @@ const PRESETS = {
 };
 
 function getAuthToken() {
-  if (typeof window !== "undefined") {
-    return window.__URBAN_FLOW_API_TOKEN__ || localStorage.getItem("urban_flow_api_token") || import.meta.env.VITE_API_TOKEN || "";
+  // R2: Persistent browser storage (localStorage) and global window token exposure are eliminated.
+  // In desktop Electron mode, authentication is handled natively in the main process over portless IPC.
+  if (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_TOKEN) {
+    return import.meta.env.VITE_API_TOKEN;
   }
-  return import.meta.env.VITE_API_TOKEN || "";
+  return "";
 }
 
 async function request(url, options = {}) {
@@ -40,13 +42,9 @@ async function request(url, options = {}) {
 
 function imageUrl(path) {
   if (!path) return "";
-  const token = getAuthToken();
-  const base = path.startsWith("http") ? path : `${API}${path}`;
-  if (token && !base.includes("api_token=")) {
-    const separator = base.includes("?") ? "&" : "?";
-    return `${base}${separator}api_token=${encodeURIComponent(token)}`;
-  }
-  return base;
+  // R2: Query-string master token leakage eliminated.
+  // Desktop app serves uploads directly via app:// origin with CSP sandbox.
+  return path.startsWith("http") ? path : `${API}${path}`;
 }
 
 function formatDate(value) {
@@ -662,11 +660,6 @@ export default function App() {
   const [health, setHealth] = useState(null);
   const [theme, setTheme] = useState("dark");
   useEffect(() => {
-    if (typeof window !== "undefined" && window.urbanflow && typeof window.urbanflow.getApiToken === "function") {
-      window.urbanflow.getApiToken().then((tok) => {
-        if (tok) window.__URBAN_FLOW_API_TOKEN__ = tok;
-      }).catch(() => {});
-    }
     const saved = localStorage.getItem("urban-flow-theme");
     if (saved) setTheme(saved);
   }, []);
