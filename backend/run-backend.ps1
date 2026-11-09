@@ -1,3 +1,7 @@
+param(
+    [switch]$Dev = $false
+)
+
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
 
@@ -33,7 +37,14 @@ if ($ModelFile) {
 } else {
     Write-Host "No YOLO weights found. Add yolov8m.pt, yolov8s.pt, or yolov8n.pt to backend\."
 }
-& $BackendPython -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
+$UvicornArgs = @("main:app", "--host", "127.0.0.1", "--port", "8000")
+if ($Dev) {
+    Write-Host "Development mode enabled (--reload active)"
+    $UvicornArgs += @("--reload")
+} else {
+    Write-Host "Production mode active (secure non-reload execution)"
+}
+& $BackendPython -m uvicorn @UvicornArgs
 if ($LASTEXITCODE -ne 0) {
     throw "FastAPI stopped with exit code $LASTEXITCODE. Check whether port 8000 is already in use."
 }

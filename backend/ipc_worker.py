@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sys
 import uuid
 from pathlib import Path
@@ -17,6 +18,24 @@ try:
 except Exception:
     pass
 
+from security_config import (
+    ALLOWED_EXTENSIONS,
+    ALLOWED_IMAGE_EXTENSIONS,
+    ALLOWED_VIDEO_EXTENSIONS,
+    MAX_JUNCTION_NAME_LENGTH,
+    MAX_UPLOAD_SIZE_BYTES,
+    MAX_VEHICLE_COUNT,
+    cleanup_storage,
+    sanitize_junction_name,
+    save_report_atomic,
+    secure_file_permissions,
+    validate_image_file,
+    validate_video_file,
+    verify_magic_bytes,
+)
+
+if (BASE_DIR / ".env").is_file():
+    secure_file_permissions(BASE_DIR / ".env")
 from services.detection import (
     ModelUnavailableError,
     analyse_image,
@@ -29,10 +48,10 @@ from services.gemini import (
     get_gemini_status,
 )
 from services.planning import (
-    DIRECTIONS,
+    DEFAULT_ALL_RED_SECONDS,
     DEFAULT_GREEN_BUDGET,
     DEFAULT_YELLOW_SECONDS,
-    DEFAULT_ALL_RED_SECONDS,
+    DIRECTIONS,
     create_signal_plan,
 )
 
@@ -46,35 +65,45 @@ LOGGER = logging.getLogger("ipc_worker")
 
 
 def _save_report(report: dict) -> dict:
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    report_file = REPORT_DIR / f"{report['report_id']}.json"
-    report_file.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    return report
+    return save_report_atomic(report, REPORT_DIR, source_channel="ipc")
 
 
 def _validate_counts(counts: dict) -> dict[str, int]:
     if not isinstance(counts, dict) or set(counts.keys()) != set(DIRECTIONS):
         raise ValueError("Provide counts for North, South, East, and West.")
+    cleaned = {}
     for d in DIRECTIONS:
         val = counts.get(d)
-        if isinstance(val, bool) or not isinstance(val, int) or val < 0:
+        if isinstance(val, bool):
+            raise ValueError(f"Vehicle count for {d} cannot be a boolean.")
+        if not isinstance(val, int) or val < 0:
             raise ValueError(f"Vehicle count for {d} must be a non-negative integer.")
-    return {direction: int(counts[direction]) for direction in DIRECTIONS}
+        if val > MAX_VEHICLE_COUNT:
+            raise ValueError(f"Vehicle count for {d} exceeds maximum limit of {MAX_VEHICLE_COUNT}.")
+        cleaned[d] = val
+    return cleaned
 
 
 def handle_health(data: dict) -> dict:
+    det = get_detection_status()
+    gem = get_gemini_status()
     return {
         "app": "urban_flow",
         "status": "ok",
-        **get_detection_status(),
-        **get_gemini_status(),
+        "computer_vision_ready": det["computer_vision_ready"],
+        "missing_dependencies": det.get("missing_dependencies", []),
+        "model_available": det["model_available"],
+        "model_name": det.get("model_name"),  # Filename only, no absolute filesystem paths
+        "gemini_available": gem["gemini_available"],
+        "privacy_mode": "local_default",
         "storage": "local",
     }
 
 
 def handle_simulate(data: dict) -> dict:
     counts = _validate_counts(data.get("counts", {}))
-    junction_name = data.get("junction_name") or "Demo Junction"
+    raw_name = data.get("junction_name") or "Demo Junction"
+    junction_name = sanitize_junction_name(raw_name)
     green_budget = int(data.get("green_budget", DEFAULT_GREEN_BUDGET))
     yellow_seconds = int(data.get("yellow_seconds", DEFAULT_YELLOW_SECONDS))
     all_red_seconds = int(data.get("all_red_seconds", DEFAULT_ALL_RED_SECONDS))
@@ -92,7 +121,8 @@ def handle_simulate(data: dict) -> dict:
 
 def handle_calculate_signal_plan(data: dict) -> dict:
     counts = _validate_counts(data.get("counts", {}))
-    junction_name = data.get("junction_name") or "Demo Junction"
+    raw_name = data.get("junction_name") or "Demo Junction"
+    junction_name = sanitize_junction_name(raw_name)
     green_budget = int(data.get("green_budget", DEFAULT_GREEN_BUDGET))
     yellow_seconds = int(data.get("yellow_seconds", DEFAULT_YELLOW_SECONDS))
     all_red_seconds = int(data.get("all_red_seconds", DEFAULT_ALL_RED_SECONDS))
@@ -111,38 +141,69 @@ def handle_analyse(data: dict, video: bool = False) -> dict:
     file_path_str = data.get("file_path")
     if not file_path_str:
         raise ValueError("file_path is required for analysis.")
-    src_path = Path(file_path_str)
+    src_path = Path(file_path_str).resolve()
     if not src_path.is_file():
         raise FileNotFoundError(f"Source file not found: {file_path_str}")
 
+    # Enforce maximum upload size before reading/copying (Finding 4, 12)
+    file_size = src_path.stat().st_size
+    if file_size > MAX_UPLOAD_SIZE_BYTES:
+        raise ValueError("File exceeds maximum allowed size of 100 MB.")
+    if file_size == 0:
+        raise ValueError("Uploaded file is empty.")
+
     suffix = src_path.suffix.lower()
-    allowed = {".mp4"} if video else {".jpg", ".jpeg", ".jpe", ".png"}
-    if suffix not in allowed:
+    allowed = ALLOWED_VIDEO_EXTENSIONS if video else ALLOWED_IMAGE_EXTENSIONS
+    if suffix not in allowed or suffix not in ALLOWED_EXTENSIONS:
         raise ValueError(f"Unsupported file type '{suffix}'. Use: {', '.join(sorted(allowed))}")
 
-    # Ensure file is saved in UPLOAD_DIR
+    # Verify magic bytes
+    with src_path.open("rb") as f:
+        header = f.read(32)
+    if not verify_magic_bytes(header, suffix):
+        raise ValueError(f"Magic bytes verification failed for '{suffix}'. File is invalid or spoofed.")
+
+    # Validate image or video dimensions and decodability
+    if video:
+        validate_video_file(src_path)
+    else:
+        validate_image_file(src_path)
+
+    # Safe destination inside UPLOAD_DIR
     filename = f"{uuid.uuid4().hex}{suffix}"
     dest_path = UPLOAD_DIR / filename
-    if src_path.resolve() != dest_path.resolve():
-        dest_path.write_bytes(src_path.read_bytes())
+    if src_path != dest_path:
+        # Use shutil.copy2 for chunked file copy instead of full memory read
+        shutil.copy2(src_path, dest_path)
 
     green_budget = int(data.get("green_budget", DEFAULT_GREEN_BUDGET))
     yellow_seconds = int(data.get("yellow_seconds", DEFAULT_YELLOW_SECONDS))
     all_red_seconds = int(data.get("all_red_seconds", DEFAULT_ALL_RED_SECONDS))
-    junction_name = data.get("junction_name") or src_path.stem.replace("_", " ").title()
+    raw_name = data.get("junction_name") or src_path.stem.replace("_", " ").title()
+    junction_name = sanitize_junction_name(raw_name)
+    use_cloud_ai = bool(data.get("use_cloud_ai", False))
 
     result = None
     gemini_error = None
-    if get_gemini_status()["gemini_available"]:
+
+    # Finding 6: Local-only processing is default.
+    # Cloud AI is only used if use_cloud_ai is True.
+    if use_cloud_ai and get_gemini_status()["gemini_available"]:
+        LOGGER.info("User requested cloud processing; attempting Gemini.")
         try:
             result = analyse_with_gemini(dest_path, UPLOAD_DIR, video)
         except (GeminiAnalysisError, ValueError) as error:
             gemini_error = error
             LOGGER.warning("Gemini analysis failed; falling back to local YOLO (%s)", error)
 
-    if result is None:
-        result = analyse_video(dest_path, UPLOAD_DIR) if video else analyse_image(dest_path, UPLOAD_DIR)
-        result["analysis_provider"] = "local-yolo"
+    try:
+        if result is None:
+            result = analyse_video(dest_path, UPLOAD_DIR) if video else analyse_image(dest_path, UPLOAD_DIR)
+            result["analysis_provider"] = "local-yolo"
+    except Exception as error:
+        dest_path.unlink(missing_ok=True)
+        LOGGER.exception("Inference failed: %s", error)
+        raise
 
     report = create_signal_plan(
         result["counts"],
@@ -158,11 +219,13 @@ def handle_analyse(data: dict, video: bool = False) -> dict:
         yellow_seconds=yellow_seconds,
         all_red_seconds=all_red_seconds,
     )
+    # Trigger cleanup
+    cleanup_storage(UPLOAD_DIR, REPORT_DIR)
     return _save_report(report)
 
 
 def handle_get_report(data: dict) -> dict:
-    report_id = data.get("report_id", "")
+    report_id = str(data.get("report_id", ""))
     if not report_id.isalnum():
         raise ValueError("Invalid report ID.")
     report_path = REPORT_DIR / f"{report_id}.json"
@@ -172,7 +235,7 @@ def handle_get_report(data: dict) -> dict:
 
 
 def handle_update_cycle(data: dict) -> dict:
-    report_id = data.get("report_id", "")
+    report_id = str(data.get("report_id", ""))
     if not report_id.isalnum():
         raise ValueError("Invalid report ID.")
     report_path = REPORT_DIR / f"{report_id}.json"
@@ -204,7 +267,7 @@ def handle_update_cycle(data: dict) -> dict:
 
 
 def handle_update_counts(data: dict) -> dict:
-    report_id = data.get("report_id", "")
+    report_id = str(data.get("report_id", ""))
     if not report_id.isalnum():
         raise ValueError("Invalid report ID.")
     report_path = REPORT_DIR / f"{report_id}.json"
@@ -261,6 +324,7 @@ def main():
         line = line.strip()
         if not line:
             continue
+        req_id = None
         try:
             req = json.loads(line)
             req_id = req.get("id")
@@ -275,7 +339,11 @@ def main():
                 resp = {"id": req_id, "ok": True, "result": result}
         except Exception as e:
             LOGGER.exception("Error processing request: %s", e)
-            resp = {"id": req.get("id") if "req" in locals() and isinstance(req, dict) else None, "ok": False, "error": str(e)}
+            # Return safe client error message without path disclosure
+            err_msg = str(e)
+            # Strip absolute paths if present
+            err_msg = os.path.basename(err_msg) if ("\\" in err_msg or "/" in err_msg) else err_msg
+            resp = {"id": req_id, "ok": False, "error": err_msg}
 
         print(json.dumps(resp), flush=True)
 

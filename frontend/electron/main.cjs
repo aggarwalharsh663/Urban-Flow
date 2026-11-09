@@ -1,4 +1,4 @@
-const { app, BrowserWindow, protocol, shell, net } = require('electron');
+const { app, BrowserWindow, protocol, shell, net, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const readline = require('readline');
@@ -61,6 +61,121 @@ const WORKER_SCRIPT = path.join(BACKEND_DIR, 'ipc_worker.py');
 const icoPath = path.join(FRONTEND_DIR, 'public', 'favicon.ico');
 const pngPath = path.join(FRONTEND_DIR, 'public', 'urban-flow-dark.png');
 const ICON_PATH = fs.existsSync(icoPath) ? icoPath : pngPath;
+
+// --- Security Limits & AllowLists ---
+const MAX_UPLOAD_SIZE = 100 * 1024 * 1024; // 100 MB prototype limit
+const ALLOWED_UPLOAD_EXTS = new Set(['.jpg', '.jpeg', '.png', '.mp4']);
+const ALLOWED_CLIENT_EXTS = new Set([
+  '.html', '.js', '.mjs', '.css', '.json',
+  '.png', '.jpg', '.jpeg', '.svg', '.ico',
+  '.woff', '.woff2', '.txt'
+]);
+
+// MIME types for safe asset serving
+const mimeTypes = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.mp4': 'video/mp4',
+  '.txt': 'text/plain; charset=utf-8',
+};
+
+// Security Headers
+const CSP_HEADER = (
+  "default-src 'self' app:; " +
+  "script-src 'self' app: 'unsafe-inline'; " +
+  "style-src 'self' app: 'unsafe-inline' https://fonts.googleapis.com; " +
+  "img-src 'self' app: data: blob:; " +
+  "media-src 'self' app: blob:; " +
+  "font-src 'self' app: data: https://fonts.gstatic.com; " +
+  "connect-src 'self' app: http://127.0.0.1:8000; " +
+  "frame-ancestors 'none';"
+);
+
+function applySecurityHeaders(headers = {}) {
+  return Object.assign({
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'strict-origin-when-cross-origin',
+    'content-security-policy': CSP_HEADER,
+  }, headers);
+}
+
+// Anti-Path-Traversal containment validator (Finding 2)
+function safeDecodeURI(uri) {
+  let current = uri;
+  for (let i = 0; i < 5; i++) {
+    try {
+      const decoded = decodeURIComponent(current);
+      if (decoded === current) break;
+      current = decoded;
+    } catch (e) {
+      return null; // Malformed URI encoding
+    }
+  }
+  return current;
+}
+
+function resolveContainedPath(baseDir, requestedPath, allowedExtensions) {
+  const decoded = safeDecodeURI(requestedPath);
+  if (decoded === null) return null;
+  // Reject null bytes, backslashes, control characters
+  if (/[\0\x00-\x1f\\]/.test(decoded)) return null;
+
+  // Normalize path
+  const normalized = path.posix.normalize(decoded);
+  // Ensure it doesn't escape via ..
+  const parts = normalized.split('/').filter(p => p && p !== '.');
+  if (parts.some(p => p === '..')) return null;
+
+  const resolved = path.resolve(baseDir, parts.join(path.sep));
+  const relative = path.relative(baseDir, resolved);
+
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    return null; // Outside base directory
+  }
+
+  // Reject sensitive dotfiles and blacklisted extensions
+  const baseName = path.basename(resolved).toLowerCase();
+  if (baseName.startsWith('.') || baseName.endsWith('.env') || baseName.endsWith('.py') || baseName.endsWith('.pt') || baseName.endsWith('.lock') || baseName.endsWith('.cs') || baseName.endsWith('.bat') || baseName.endsWith('.vbs')) {
+    return null;
+  }
+
+  const ext = path.extname(resolved).toLowerCase();
+  if (allowedExtensions && !allowedExtensions.has(ext)) {
+    return null; // Disallowed extension
+  }
+
+  return resolved;
+}
+
+// Magic bytes validator (Finding 4 & 7)
+function verifyMagicBytes(buffer, ext) {
+  if (!buffer || buffer.length < 4) return false;
+  if (ext === '.jpg' || ext === '.jpeg') {
+    return buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF;
+  }
+  if (ext === '.png') {
+    return (
+      buffer.length >= 8 &&
+      buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47 &&
+      buffer[4] === 0x0D && buffer[5] === 0x0A && buffer[6] === 0x1A && buffer[7] === 0x0A
+    );
+  }
+  if (ext === '.mp4') {
+    return buffer.length >= 8 && buffer.slice(4, 8).toString('latin1') === 'ftyp';
+  }
+  return false;
+}
 
 // --- Portless Python IPC Bridge (stdin / stdout pipes) ---
 const pendingRequests = new Map();
@@ -167,150 +282,194 @@ function sendIpcRequest(action, data = {}, timeoutMs = 30000) {
   });
 }
 
-// --- MIME types for file serving ---
-const mimeTypes = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.mjs': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.svg': 'image/svg+xml',
-  '.ico': 'image/x-icon',
-  '.woff': 'font/woff',
-  '.woff2': 'font/woff2',
-  '.mp4': 'video/mp4',
-};
+// Secure IPC handlers for ContextBridge Preload (SEC-RES-05)
+if (ipcMain) {
+  ipcMain.handle('get-api-token', async () => {
+    return process.env.URBAN_FLOW_API_TOKEN || '';
+  });
+
+  ipcMain.handle('worker-request', async (event, payload) => {
+    const { action, data } = payload || {};
+    if (!action || typeof action !== 'string') {
+      throw new Error('Invalid IPC action');
+    }
+    return sendIpcRequest(action, data || {});
+  });
+}
 
 // --- Custom app:// Protocol Handler (Zero Network Ports) ---
 function registerProtocolHandler() {
   protocol.handle('app', async (req) => {
     try {
       const parsedUrl = new URL(req.url);
-      let pathname = decodeURIComponent(parsedUrl.pathname);
-      log(`[app://] ${req.method} ${pathname}`);
+      let rawPathname = parsedUrl.pathname;
+      log(`[app://] ${req.method} ${rawPathname}`);
 
       // 1. API: /api/health
-      if (pathname === '/api/health') {
+      if (rawPathname === '/api/health') {
         const result = await sendIpcRequest('health', {});
         return new Response(JSON.stringify(result), {
-          headers: { 'content-type': 'application/json' },
+          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
         });
       }
 
       // 2. API: /api/simulate
-      if (pathname === '/api/simulate' && req.method === 'POST') {
+      if (rawPathname === '/api/simulate' && req.method === 'POST') {
         const body = await req.json().catch(() => ({}));
         const result = await sendIpcRequest('simulate', body);
         return new Response(JSON.stringify(result), {
-          headers: { 'content-type': 'application/json' },
+          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
         });
       }
 
       // 3. API: /api/calculate-signal-plan
-      if (pathname === '/api/calculate-signal-plan' && req.method === 'POST') {
+      if (rawPathname === '/api/calculate-signal-plan' && req.method === 'POST') {
         const body = await req.json().catch(() => ({}));
         const result = await sendIpcRequest('calculate-signal-plan', body);
         return new Response(JSON.stringify(result), {
-          headers: { 'content-type': 'application/json' },
+          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
         });
       }
 
       // 4. API: /api/reports/:id
-      const reportMatch = pathname.match(/^\/api\/reports\/([a-zA-Z0-9]+)$/);
+      const reportMatch = rawPathname.match(/^\/api\/reports\/([a-zA-Z0-9]+)$/);
       if (reportMatch) {
         const reportId = reportMatch[1];
         const result = await sendIpcRequest('get-report', { report_id: reportId });
         return new Response(JSON.stringify(result), {
-          headers: { 'content-type': 'application/json' },
+          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
         });
       }
 
       // 5. API: /api/reports/:id/cycle
-      const cycleMatch = pathname.match(/^\/api\/reports\/([a-zA-Z0-9]+)\/cycle$/);
+      const cycleMatch = rawPathname.match(/^\/api\/reports\/([a-zA-Z0-9]+)\/cycle$/);
       if (cycleMatch && req.method === 'PUT') {
         const reportId = cycleMatch[1];
         const body = await req.json().catch(() => ({}));
         const result = await sendIpcRequest('update-cycle', { report_id: reportId, ...body });
         return new Response(JSON.stringify(result), {
-          headers: { 'content-type': 'application/json' },
+          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
         });
       }
 
       // 6. API: /api/reports/:id/counts
-      const countsMatch = pathname.match(/^\/api\/reports\/([a-zA-Z0-9]+)\/counts$/);
+      const countsMatch = rawPathname.match(/^\/api\/reports\/([a-zA-Z0-9]+)\/counts$/);
       if (countsMatch && req.method === 'PUT') {
         const reportId = countsMatch[1];
         const body = await req.json().catch(() => ({}));
         const result = await sendIpcRequest('update-counts', { report_id: reportId, ...body });
         return new Response(JSON.stringify(result), {
-          headers: { 'content-type': 'application/json' },
+          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
         });
       }
 
       // 7. API: /api/analyse-image and /api/analyse-video (multipart/form-data upload)
-      if (pathname === '/api/analyse-image' || pathname === '/api/analyse-video') {
-        const isVideo = pathname === '/api/analyse-video';
+      if (rawPathname === '/api/analyse-image' || rawPathname === '/api/analyse-video') {
+        const isVideo = rawPathname === '/api/analyse-video';
         const formData = await req.formData();
         const file = formData.get('file');
         if (!file) {
           return new Response(JSON.stringify({ detail: 'No file uploaded.' }), {
             status: 400,
-            headers: { 'content-type': 'application/json' },
+            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
           });
         }
 
-        const ext = path.extname(file.name || (isVideo ? '.mp4' : '.jpg')).toLowerCase();
-        const tempName = `${crypto.randomUUID()}${ext}`;
-        const tempPath = path.join(UPLOAD_DIR, tempName);
+        // Enforce 100 MB max size before reading into memory (Finding 4, 12)
+        if (file.size > MAX_UPLOAD_SIZE) {
+          return new Response(JSON.stringify({ detail: 'Upload exceeds 100 MB limit.' }), {
+            status: 413,
+            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+          });
+        }
+
+        // Strict extension validation
+        const ext = path.extname(file.name || '').toLowerCase();
+        const expectedExts = isVideo ? new Set(['.mp4']) : new Set(['.jpg', '.jpeg', '.png']);
+        if (!expectedExts.has(ext)) {
+          return new Response(JSON.stringify({ detail: `Unsupported file type '${ext}'. Allowed: ${Array.from(expectedExts).join(', ')}` }), {
+            status: 400,
+            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+          });
+        }
 
         const arrayBuffer = await file.arrayBuffer();
-        fs.writeFileSync(tempPath, Buffer.from(arrayBuffer));
+        const fileBuffer = Buffer.from(arrayBuffer);
 
-        const result = await sendIpcRequest(isVideo ? 'analyse-video' : 'analyse-image', {
-          file_path: tempPath,
-          junction_name: formData.get('junction_name') || null,
-          green_budget: Number(formData.get('green_budget')) || 120,
-          yellow_seconds: Number(formData.get('yellow_seconds')) || 3,
-        });
+        // Verify magic bytes before saving (Finding 4 & 7)
+        if (!verifyMagicBytes(fileBuffer, ext)) {
+          return new Response(JSON.stringify({ detail: `File content does not match expected format for ${ext}.` }), {
+            status: 400,
+            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+          });
+        }
 
-        return new Response(JSON.stringify(result), {
-          headers: { 'content-type': 'application/json' },
-        });
+        const tempName = `${crypto.randomUUID()}${ext}`;
+        const tempPath = path.join(UPLOAD_DIR, tempName);
+        fs.writeFileSync(tempPath, fileBuffer);
+
+        try {
+          const useCloudAi = formData.get('use_cloud_ai') === 'true';
+          const result = await sendIpcRequest(isVideo ? 'analyse-video' : 'analyse-image', {
+            file_path: tempPath,
+            junction_name: (formData.get('junction_name') || '').trim() || null,
+            green_budget: Math.max(40, Math.min(600, Number(formData.get('green_budget')) || 120)),
+            yellow_seconds: Math.max(1, Math.min(10, Number(formData.get('yellow_seconds')) || 3)),
+            use_cloud_ai: useCloudAi,
+          }, isVideo ? 60000 : 30000);
+
+          return new Response(JSON.stringify(result), {
+            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+          });
+        } catch (ipcErr) {
+          // Clean up temp file on failure
+          try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch (e) {}
+          throw ipcErr;
+        }
       }
 
-      // 8. Static uploaded media files (/uploads/...)
-      if (pathname.startsWith('/uploads/')) {
-        const filename = path.basename(pathname);
-        const filePath = path.join(UPLOAD_DIR, filename);
-        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-          const ext = path.extname(filePath).toLowerCase();
+      // 8. Static uploaded media files (/uploads/...) with traversal & XSS protection (Finding 2 & 4)
+      if (rawPathname.startsWith('/uploads/')) {
+        const uploadSubPath = rawPathname.substring('/uploads'.length);
+        const safeFilePath = resolveContainedPath(UPLOAD_DIR, uploadSubPath, ALLOWED_UPLOAD_EXTS);
+        if (safeFilePath && fs.existsSync(safeFilePath) && fs.statSync(safeFilePath).isFile()) {
+          const ext = path.extname(safeFilePath).toLowerCase();
           const contentType = mimeTypes[ext] || 'application/octet-stream';
-          const fileData = fs.readFileSync(filePath);
+          const fileData = fs.readFileSync(safeFilePath);
           return new Response(fileData, {
             headers: {
               'content-type': contentType,
+              'content-disposition': `inline; filename="${path.basename(safeFilePath)}"`,
+              'x-content-type-options': 'nosniff',
+              'content-security-policy': "default-src 'none'; sandbox",
               'cache-control': 'public, max-age=31536000, immutable',
             },
           });
         }
-        return new Response('Not Found', { status: 404 });
+        return new Response('Not Found', {
+          status: 404,
+          headers: applySecurityHeaders({ 'content-type': 'text/plain' })
+        });
       }
 
-      // 9. Static frontend assets from dist/client
-      if (pathname !== '/' && pathname !== '' && pathname !== '/index.html') {
-        const filePath = path.join(CLIENT_DIR, pathname);
-        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-          const ext = path.extname(filePath).toLowerCase();
+      // 9. Static frontend assets from dist/client with strict traversal protection (Finding 2)
+      if (rawPathname !== '/' && rawPathname !== '' && rawPathname !== '/index.html') {
+        const safeAssetPath = resolveContainedPath(CLIENT_DIR, rawPathname, ALLOWED_CLIENT_EXTS);
+        if (safeAssetPath && fs.existsSync(safeAssetPath) && fs.statSync(safeAssetPath).isFile()) {
+          const ext = path.extname(safeAssetPath).toLowerCase();
           const contentType = mimeTypes[ext] || 'application/octet-stream';
-          const fileData = fs.readFileSync(filePath);
+          const fileData = fs.readFileSync(safeAssetPath);
           return new Response(fileData, {
-            headers: {
+            headers: applySecurityHeaders({
               'content-type': contentType,
               'cache-control': 'public, max-age=31536000, immutable',
-            },
+            }),
+          });
+        } else if (rawPathname.includes('..') || rawPathname.includes('%2e%2e') || rawPathname.includes('%252e')) {
+          // Traversal attempt explicitly blocked
+          return new Response('Forbidden', {
+            status: 403,
+            headers: applySecurityHeaders({ 'content-type': 'text/plain' })
           });
         }
       }
@@ -319,19 +478,22 @@ function registerProtocolHandler() {
       if (fs.existsSync(INDEX_HTML)) {
         const html = fs.readFileSync(INDEX_HTML, 'utf-8');
         return new Response(html, {
-          headers: {
+          headers: applySecurityHeaders({
             'content-type': 'text/html; charset=utf-8',
             'cache-control': 'no-cache',
-          },
+          }),
         });
       }
 
-      return new Response('Application bundle missing index.html.', { status: 500 });
+      return new Response('Application bundle missing index.html.', {
+        status: 500,
+        headers: applySecurityHeaders({ 'content-type': 'text/plain' })
+      });
     } catch (err) {
       log('[Protocol Error]', err);
       return new Response(JSON.stringify({ detail: err.message || 'Internal Error' }), {
         status: 500,
-        headers: { 'content-type': 'application/json' },
+        headers: applySecurityHeaders({ 'content-type': 'application/json' }),
       });
     }
   });
@@ -351,6 +513,7 @@ function createSplash() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
     },
   });
 
@@ -426,8 +589,12 @@ function createWindow() {
     autoHideMenuBar: true,
     show: false,
     webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
       contextIsolation: true,
+      sandbox: true,
+      webSecurity: true,
+      allowRunningInsecureContent: false,
       spellcheck: false,
     },
   });
@@ -461,6 +628,14 @@ function createWindow() {
     }
   };
 
+  mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
+    log(`[Renderer Console] ${message} (${sourceId}:${line})`);
+  });
+
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    log(`[Renderer Process Gone] reason: ${details.reason}, exitCode: ${details.exitCode}`);
+  });
+
   mainWindow.once('ready-to-show', () => {
     log('mainWindow ready-to-show event fired!');
     showMainWindow();
@@ -487,8 +662,22 @@ function createWindow() {
     }, 1500);
   });
 
+  // Navigation lock (Finding 9: Restrict navigation to approved origins)
+  mainWindow.webContents.on('will-navigate', (event, navigationUrl) => {
+    if (!navigationUrl.startsWith('app://')) {
+      log('Prevented unauthorized navigation to:', navigationUrl);
+      event.preventDefault();
+    }
+  });
+
+  // Restrict window opening (Finding 9)
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        shell.openExternal(url);
+      }
+    } catch (e) {}
     return { action: 'deny' };
   });
 

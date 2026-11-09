@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 $BackendPath = $PSScriptRoot
-$PackageIndex = "https://mirrors.ustc.edu.cn/pypi/simple"
+# Secure supply chain: Use official PyPI index
+$PackageIndex = "https://pypi.org/simple"
 $PythonCommand = Get-Command python -ErrorAction SilentlyContinue
 
 if (-not $PythonCommand) {

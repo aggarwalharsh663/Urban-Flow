@@ -18,9 +18,21 @@ const PRESETS = {
   "Low night traffic": { North: 2, South: 1, East: 2, West: 1 },
 };
 
-async function request(url, options) {
+function getAuthToken() {
+  if (typeof window !== "undefined") {
+    return window.__URBAN_FLOW_API_TOKEN__ || localStorage.getItem("urban_flow_api_token") || import.meta.env.VITE_API_TOKEN || "";
+  }
+  return import.meta.env.VITE_API_TOKEN || "";
+}
+
+async function request(url, options = {}) {
   const fullUrl = url.startsWith("http") ? url : `${API}${url}`;
-  const response = await fetch(fullUrl, options);
+  const token = getAuthToken();
+  const headers = new Headers(options.headers || {});
+  if (token && !headers.has("X-API-Token")) {
+    headers.set("X-API-Token", token);
+  }
+  const response = await fetch(fullUrl, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.detail || "The request could not be completed.");
   return body;
@@ -28,8 +40,13 @@ async function request(url, options) {
 
 function imageUrl(path) {
   if (!path) return "";
-  if (path.startsWith("http")) return path;
-  return `${API}${path}`;
+  const token = getAuthToken();
+  const base = path.startsWith("http") ? path : `${API}${path}`;
+  if (token && !base.includes("api_token=")) {
+    const separator = base.includes("?") ? "&" : "?";
+    return `${base}${separator}api_token=${encodeURIComponent(token)}`;
+  }
+  return base;
 }
 
 function formatDate(value) {
@@ -188,17 +205,18 @@ function Dashboard({ report, setJunctionName }) {
   );
 }
 
-function UploadAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetChange }) {
+function UploadAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetChange, health }) {
   const inputRef = useRef(null);
   const [file, setFile] = useState(null);
   const [preview, setPreview] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [useCloudAi, setUseCloudAi] = useState(false);
   useEffect(() => () => { if (preview.startsWith("blob:")) URL.revokeObjectURL(preview); }, [preview]);
   const acceptFile = (selected) => {
     if (!selected) return;
     const extension = selected.name.toLowerCase().split(".").pop();
-    const isImage = ["jpg", "jpeg", "jpe", "png"].includes(extension) || ["image/jpeg", "image/png"].includes(selected.type);
+    const isImage = ["jpg", "jpeg", "png"].includes(extension) || ["image/jpeg", "image/png"].includes(selected.type);
     const isVideo = extension === "mp4" || selected.type === "video/mp4";
     if (!isImage && !isVideo) { setError("Choose a JPG, JPEG, PNG, or MP4 file."); return; }
     if (selected.size > 100 * 1024 * 1024) { setError("File is larger than the 100 MB limit."); return; }
@@ -209,9 +227,11 @@ function UploadAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetCha
   const analyse = async () => {
     if (!file) return;
     setBusy(true); setError("");
-    const form = new FormData(); form.append("file", file);
-    if (junctionName?.trim()) form.append("junction_name", junctionName.trim());
+    const form = new FormData();
+    form.append("file", file);
+    if (junctionName?.trim()) form.append("junction_name", junctionName.trim().slice(0, 100));
     form.append("green_budget", greenBudget);
+    form.append("use_cloud_ai", useCloudAi ? "true" : "false");
     try {
       const endpoint = file.type.startsWith("video/") || file.name.toLowerCase().endsWith(".mp4") ? "/api/analyse-video" : "/api/analyse-image";
       const report = await request(endpoint, { method: "POST", body: form });
@@ -223,13 +243,49 @@ function UploadAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetCha
   return (
     <div className="upload-panel">
       <div className={`dropzone ${preview ? "has-preview" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); acceptFile(event.dataTransfer.files[0]); }}>
-        <input ref={inputRef} type="file" accept=".jpg,.jpeg,.jpe,.png,.mp4,image/jpeg,image/png,video/mp4" hidden onChange={(event) => acceptFile(event.target.files[0])} />
+        <input ref={inputRef} type="file" accept=".jpg,.jpeg,.png,.mp4,image/jpeg,image/png,video/mp4" hidden onChange={(event) => acceptFile(event.target.files[0])} />
         {preview ? <div className="preview-wrap">{file.type.startsWith("video/") || file.name.endsWith(".mp4") ? <video src={preview} controls /> : <img src={preview} alt="Uploaded junction preview" />}<div className="preview-footer"><span>{file.name}</span><button className="icon-button" onClick={reset} aria-label="Remove file"><X size={16} /></button></div></div> :
-          <button className="drop-content" onClick={() => inputRef.current?.click()}><span className="upload-icon"><UploadCloud size={23} /></span><strong>Drop a junction image or video here</strong><span>or <u>browse files</u> from your device</span><small><FileImage size={13} /> JPG, JPEG, JPE, PNG <i /> <FileVideo2 size={13} /> MP4 · up to 100 MB</small></button>}
+          <button className="drop-content" onClick={() => inputRef.current?.click()}><span className="upload-icon"><UploadCloud size={23} /></span><strong>Drop a junction image or video here</strong><span>or <u>browse files</u> from your device</span><small><FileImage size={13} /> JPG, JPEG, PNG <i /> <FileVideo2 size={13} /> MP4 · up to 100 MB</small></button>}
       </div>
       {error && <div className="inline-error"><AlertTriangle size={15} />{error}</div>}
+      
+      {health?.geminiAvailable ? (
+        <div className="privacy-option-card" style={{ margin: "14px 0", padding: "12px 14px", borderRadius: "8px", border: "1px solid var(--border-color, #2a3140)", background: "rgba(255,255,255,0.03)" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: "10px", cursor: "pointer", fontSize: "13px", fontWeight: "500" }}>
+            <input
+              type="checkbox"
+              checked={useCloudAi}
+              onChange={(e) => setUseCloudAi(e.target.checked)}
+            />
+            <span>Enable cloud vision with Google Gemini (Optional)</span>
+          </label>
+          {useCloudAi ? (
+            <p style={{ margin: "6px 0 0 24px", color: "#f59e0b", fontSize: "12px" }}>
+              <strong>Privacy Notice:</strong> Uploaded media will be transmitted to Google Gemini servers.
+            </p>
+          ) : (
+            <p style={{ margin: "6px 0 0 24px", color: "#22c55e", fontSize: "12px" }}>
+              <strong>Default Local Mode:</strong> Analysis runs 100% locally with YOLOv8. No images or videos leave this computer.
+            </p>
+          )}
+        </div>
+      ) : (
+        <div style={{ margin: "12px 0", fontSize: "12px", color: "var(--ink-soft, #8b949e)", display: "flex", alignItems: "center", gap: "6px" }}>
+          <ShieldCheck size={14} />
+          <span>Local processing active: YOLOv8 vehicle detection (Google Gemini not configured)</span>
+        </div>
+      )}
+
       <CycleTimingControl budget={greenBudget} onChange={onBudgetChange} title="Signal Cycle Green Budget" description="Pre-set green budget before running video/image analysis" />
-      <div className="upload-actions"><span className="local-process"><ShieldCheck size={14} />Files stay on this machine</span><button onClick={analyse} className="button button-primary analyse-button" disabled={!file || busy}>{busy ? <><LoaderCircle className="spin" size={16} />Detecting vehicles locally…</> : <><Sparkles size={16} />Analyse traffic</>}</button></div>
+      <div className="upload-actions">
+        <span className="local-process">
+          <ShieldCheck size={14} />
+          {useCloudAi ? "Cloud Gemini Mode" : "Local YOLOv8 Mode"}
+        </span>
+        <button onClick={analyse} className="button button-primary analyse-button" disabled={!file || busy}>
+          {busy ? <><LoaderCircle className="spin" size={16} />{useCloudAi ? "Analysing with Gemini…" : "Detecting vehicles locally…"}</> : <><Sparkles size={16} />Analyse traffic</>}
+        </button>
+      </div>
     </div>
   );
 }
@@ -239,17 +295,17 @@ function Simulation({ onReport, junctionName, greenBudget = 120, onBudgetChange 
   const [selectedPreset, setSelectedPreset] = useState("Balanced traffic");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const update = (direction, value) => { setCounts((previous) => ({ ...previous, [direction]: Math.max(0, Math.min(999, Number(value) || 0)) })); setSelectedPreset(""); };
+  const update = (direction, value) => { setCounts((previous) => ({ ...previous, [direction]: Math.max(0, Math.min(10000, Number(value) || 0)) })); setSelectedPreset(""); };
   const simulate = async () => {
     setBusy(true); setError("");
-    try { const report = await request("/api/simulate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ junction_name: junctionName || "Demo Junction", counts, green_budget: greenBudget }) }); onReport(report); }
+    try { const report = await request("/api/simulate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ junction_name: (junctionName || "Demo Junction").slice(0, 100), counts, green_budget: greenBudget }) }); onReport(report); }
     catch (exception) { setError(exception.message); }
     finally { setBusy(false); }
   };
   return (
     <div className="simulation-panel">
       <div className="simulation-top"><div><span className="sim-icon"><Gauge size={18} /></span><div><strong>Manual count input</strong><small>Try a preset or enter your own counts.</small></div></div><select aria-label="Traffic preset" value={selectedPreset} onChange={(event) => { setSelectedPreset(event.target.value); if (event.target.value) setCounts({ ...PRESETS[event.target.value] }); }}><option value="">Choose a preset</option>{Object.keys(PRESETS).map((name) => <option key={name}>{name}</option>)}</select></div>
-      <div className="count-input-grid">{DIRECTIONS.map((direction) => <label key={direction}><span style={{ color: COLORS[direction] }}><DirectionIcon direction={direction} size={15} />{direction}</span><div className="number-input"><button onClick={() => update(direction, counts[direction] - 1)} aria-label={`Decrease ${direction} count`}>−</button><input aria-label={`${direction} vehicle count`} type="number" min="0" max="999" value={counts[direction]} onChange={(event) => update(direction, event.target.value)} /><button onClick={() => update(direction, counts[direction] + 1)} aria-label={`Increase ${direction} count`}>+</button></div></label>)}</div>
+      <div className="count-input-grid">{DIRECTIONS.map((direction) => <label key={direction}><span style={{ color: COLORS[direction] }}><DirectionIcon direction={direction} size={15} />{direction}</span><div className="number-input"><button onClick={() => update(direction, counts[direction] - 1)} aria-label={`Decrease ${direction} count`}>−</button><input aria-label={`${direction} vehicle count`} type="number" min="0" max="10000" value={counts[direction]} onChange={(event) => update(direction, event.target.value)} /><button onClick={() => update(direction, counts[direction] + 1)} aria-label={`Increase ${direction} count`}>+</button></div></label>)}</div>
       {error && <div className="inline-error"><AlertTriangle size={15} />{error}</div>}
       <CycleTimingControl budget={greenBudget} onChange={onBudgetChange} title="Signal Cycle Green Budget" description="Pre-set green budget before running simulation" />
       <button className="button button-secondary simulate-button" onClick={simulate} disabled={busy}>{busy ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={15} />}{busy ? "Building plan…" : "Use simulated traffic data"}<ChevronRight size={15} /></button>
@@ -257,14 +313,21 @@ function Simulation({ onReport, junctionName, greenBudget = 120, onBudgetChange 
   );
 }
 
-function AnalysisSection({ onReport, junctionName, greenBudget = 120, onBudgetChange }) {
+function AnalysisSection({ onReport, junctionName, greenBudget = 120, onBudgetChange, health }) {
   const [mode, setMode] = useState("upload");
   return (
     <section className="section-block analysis-section" id="analysis">
-      <div className="section-heading"><div><div className="eyebrow"><span className="eyebrow-line" />LOCAL ANALYSIS</div><h2>Give the junction a look</h2><p className="section-subtitle">Use a local YOLOv8 model to detect vehicles — or explore with sample counts.</p></div><span className="local-badge"><span className="status-dot" />PROCESSING STAYS LOCAL</span></div>
+      <div className="section-heading">
+        <div>
+          <div className="eyebrow"><span className="eyebrow-line" />ANALYSIS</div>
+          <h2>Give the junction a look</h2>
+          <p className="section-subtitle">Use local YOLOv8 to detect vehicles — or explore with sample counts.</p>
+        </div>
+        <span className="local-badge"><span className="status-dot" />{health?.geminiAvailable ? "LOCAL + OPTIONAL CLOUD" : "PROCESSING STAYS LOCAL"}</span>
+      </div>
       <div className="analysis-card">
         <div className="mode-tabs" role="tablist" aria-label="Analysis mode"><button className={mode === "upload" ? "selected" : ""} onClick={() => setMode("upload")}><Video size={15} />Image / video</button><button className={mode === "simulate" ? "selected" : ""} onClick={() => setMode("simulate")}><Gauge size={15} />Simulated data</button></div>
-        {mode === "upload" ? <UploadAnalysis onReport={onReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={onBudgetChange} /> : <Simulation onReport={onReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={onBudgetChange} />}
+        {mode === "upload" ? <UploadAnalysis onReport={onReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={onBudgetChange} health={health} /> : <Simulation onReport={onReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={onBudgetChange} />}
       </div>
       <div className="how-it-works" id="how-it-works"><span className="how-icon"><CircleHelp size={17} /></span><div><strong>How the prototype works</strong><p>OpenCV reads your upload; local YOLOv8 detects cars, motorcycles, buses, and trucks. Each bounding-box centre is assigned to one of four image quadrants. A separate deterministic rule distributes your configured green-time budget ({greenBudget}s) fairly.</p></div><span className="how-steps">INPUT <ChevronRight size={12} /> DETECT <ChevronRight size={12} /> RECOMMEND</span></div>
     </section>
@@ -598,7 +661,15 @@ export default function App() {
   const [greenBudget, setGreenBudget] = useState(120);
   const [health, setHealth] = useState(null);
   const [theme, setTheme] = useState("dark");
-  useEffect(() => { const saved = localStorage.getItem("urban-flow-theme"); if (saved) setTheme(saved); }, []);
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.urbanflow && typeof window.urbanflow.getApiToken === "function") {
+      window.urbanflow.getApiToken().then((tok) => {
+        if (tok) window.__URBAN_FLOW_API_TOKEN__ = tok;
+      }).catch(() => {});
+    }
+    const saved = localStorage.getItem("urban-flow-theme");
+    if (saved) setTheme(saved);
+  }, []);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("urban-flow-theme", theme);
@@ -614,6 +685,7 @@ export default function App() {
               computerVisionReady: status.computer_vision_ready,
               modelAvailable: status.model_available,
               missingDependencies: Array.isArray(status.missing_dependencies) ? status.missing_dependencies : [],
+              geminiAvailable: Boolean(status.gemini_available),
             });
           }
         })
@@ -627,5 +699,5 @@ export default function App() {
   return <div id="top" className="app-shell" data-theme={theme}><Header health={health} theme={theme} onToggleTheme={() => setTheme((current) => current === "dark" ? "light" : "dark")} />
     {health?.apiAvailable === false && <div className="setup-notice" role="status"><Info size={17} /><div><strong>Backend is not running</strong><p>Open PowerShell in the project folder and run <code>.\start-local.ps1</code>. This starts the API and website.</p></div><button type="button" onClick={() => window.location.reload()} aria-label="Retry backend connection"><RotateCcw size={15} />Retry</button></div>}
     {health?.apiAvailable && (!health.computerVisionReady || !health.modelAvailable) && <div className="setup-notice setup-notice-warning" role="status"><Info size={17} /><div><strong>{!health.computerVisionReady ? "Image/video analysis needs setup" : "Local YOLO model is missing"}</strong><p>{!health.computerVisionReady ? `Missing packages: ${health.missingDependencies.join(", ") || "OpenCV and Ultralytics"}. Run .\\backend\\setup.ps1, then restart the backend.` : "Download yolov8n.pt into backend\\, then restart the backend. Simulated counts are ready now."}</p></div></div>}
-    <main><Dashboard report={report} setJunctionName={setJunctionName} /><AnalysisSection onReport={showReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={(b) => { setGreenBudget(b); if (report) { setReport(updateReportBudget(report, b)); if (report.report_id) { request(`/api/reports/${report.report_id}/cycle`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ green_budget: b }) }).then(setReport).catch(() => {}); } } }} /><Results report={report} onUpdateReport={setReport} /><Safety /></main><footer className="footer"><a className="brand footer-brand" href="#top" aria-label="UrbanFlow home"><img src={theme === "light" ? "/urban-flow-light.png" : "/urban-flow-dark.png"} alt="UrbanFlow" /></a><span>Local computer vision · OpenCV + YOLOv8 · No cloud AI</span><a href="#safety">Safety & limitations <ArrowUp size={13} /></a></footer></div>;
+    <main><Dashboard report={report} setJunctionName={setJunctionName} /><AnalysisSection onReport={showReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={(b) => { setGreenBudget(b); if (report) { setReport(updateReportBudget(report, b)); if (report.report_id) { request(`/api/reports/${report.report_id}/cycle`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ green_budget: b }) }).then(setReport).catch(() => {}); } } }} health={health} /><Results report={report} onUpdateReport={setReport} /><Safety /></main><footer className="footer"><a className="brand footer-brand" href="#top" aria-label="UrbanFlow home"><img src={theme === "light" ? "/urban-flow-light.png" : "/urban-flow-dark.png"} alt="UrbanFlow" /></a><span>Computer vision · Local YOLOv8 & Optional Gemini · Transparent Privacy</span><a href="#safety">Safety & limitations <ArrowUp size={13} /></a></footer></div>;
 }

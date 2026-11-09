@@ -29,3 +29,13 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+
+# Security tokens & temporary files
+.urban_flow_token
+backend/.urban_flow_token
+backend/data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.tmp
+*.tmp_*

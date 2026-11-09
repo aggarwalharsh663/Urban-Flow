@@ -9,6 +9,11 @@ from pathlib import Path
 
 import cv2
 
+try:
+    from security_config import MAX_GEMINI_DETECTIONS
+except ImportError:
+    from backend.security_config import MAX_GEMINI_DETECTIONS
+
 from services.detection import DIRECTIONS, _write_annotated_frame, assign_direction
 
 DEFAULT_MODEL = "gemini-3.8-flash"
@@ -76,11 +81,15 @@ def _parse_detections(response: dict, width: int, height: int) -> list[dict]:
         raw_detections = payload["detections"]
         if not isinstance(raw_detections, list):
             raise TypeError("detections must be a list")
+        if len(raw_detections) > MAX_GEMINI_DETECTIONS:
+            raw_detections = raw_detections[:MAX_GEMINI_DETECTIONS]
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
         raise GeminiAnalysisError("Gemini returned an unusable detection response.") from error
 
     detections = []
     for item in raw_detections:
+        if len(detections) >= MAX_GEMINI_DETECTIONS:
+            break
         if not isinstance(item, dict) or item.get("class") not in {"car", "motorcycle", "bus", "truck"}:
             continue
         coordinates = item.get("box_2d")

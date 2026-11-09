@@ -1,6 +1,20 @@
 # Adaptive Traffic Signal System
 
-A full-stack decision-support prototype that can use the Google Gemini API for image understanding and falls back automatically to OpenCV with a locally stored YOLOv8 model. The deterministic Python planner recommends a fair 120-second green-time allocation. Nothing in this project connects to or controls real traffic signals. Gemini is optional: without its API key, analysis stays on this computer.
+A full-stack decision-support prototype that can use the Google Gemini API for image understanding and falls back automatically to OpenCV with a locally stored YOLOv8 model. The deterministic Python planner recommends a fair 120-second green-time allocation. Nothing in this project connects to or controls real traffic signals. Local-only YOLO processing is the default; cloud processing with Gemini is optional and requires explicit user consent per upload.
+
+## Security & Hardening
+
+Urban Flow includes a centralized security architecture (`backend/security_config.py`). All 12 findings from the application security audit have been remediated:
+- **API Authentication**: Per-launch cryptographically secure token stored in `.urban_flow_token`.
+- **CORS Restricted**: Wildcard CORS eliminated; strict allowlist for local origins and `app://urbanflow`.
+- **Path Traversal Defenses**: Strict directory containment and dotfile protection on the Electron `app://` protocol.
+- **Upload Hardening**: Strict extension allowlists, magic bytes verification, 100 MB limits, and XSS-immune asset serving.
+- **Privacy Controls**: Local-only YOLO processing is default; uploaded images are only sent to Gemini if explicitly opted-in.
+- **Resource Protections**: Sliding-window rate limiting, inference concurrency caps, and automated storage retention.
+- **Input Validation**: Strict integer checks, booleans rejected, and vehicle counts capped at 10,000.
+- **Supply Chain**: Pinned dependencies in `requirements.txt` and `requirements.lock`, using official PyPI.
+
+For full architectural details, see [SECURITY.md](SECURITY.md).
 
 ## Team Details:-
 Frontend:-Divy Dixit and Prisha Singhvi

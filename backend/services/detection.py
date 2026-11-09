@@ -3,10 +3,27 @@ from __future__ import annotations
 import importlib.util
 import logging
 import math
+import os
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+try:
+    from security_config import (
+        MAX_IMAGE_WIDTH,
+        MAX_IMAGE_HEIGHT,
+        MAX_IMAGE_PIXELS,
+        verify_model_integrity,
+    )
+except ImportError:
+    from backend.security_config import (
+        MAX_IMAGE_WIDTH,
+        MAX_IMAGE_HEIGHT,
+        MAX_IMAGE_PIXELS,
+        verify_model_integrity,
+    )
 
 logger = logging.getLogger("urban_flow.detection")
 
@@ -35,7 +52,28 @@ class ModelUnavailableError(RuntimeError):
     """Raised when locally stored YOLO weights are not available."""
 
 
+def set_inference_priority():
+    """
+    Lower CPU process priority during computer vision inference (SEC-RES-03)
+    so UI and system stay responsive.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            # BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+            ctypes.windll.kernel32.SetPriorityClass(
+                ctypes.windll.kernel32.GetCurrentProcess(), 0x00004000
+            )
+        except Exception:
+            pass
+
+
 def _available_model_path() -> Path | None:
+    custom_path_env = os.getenv("YOLO_MODEL_PATH", "").strip()
+    if custom_path_env:
+        custom_path = Path(custom_path_env).resolve()
+        if custom_path.is_file():
+            return custom_path
     backend_dir = Path(__file__).resolve().parents[1]
     return next(
         (backend_dir / filename for filename in MODEL_FILES if (backend_dir / filename).is_file()),
@@ -54,7 +92,7 @@ def get_detection_status() -> dict:
         "computer_vision_ready": not missing_dependencies,
         "missing_dependencies": missing_dependencies,
         "model_available": model_path is not None,
-        "model_path": str(model_path) if model_path else None,
+        "model_name": model_path.name if model_path else None,
     }
 
 
@@ -70,10 +108,17 @@ def _get_model():
     model_path = _available_model_path()
     if model_path is None:
         raise ModelUnavailableError(
-            f"Local YOLO weights were not found in {Path(__file__).resolve().parents[1]}. "
+            "Local YOLO weights were not found. "
             "Download yolov8m.pt, yolov8s.pt, or yolov8n.pt and place it in the backend folder; follow README.md."
         )
+    if not verify_model_integrity(model_path):
+        raise ModelUnavailableError(
+            f"Model integrity verification failed for '{model_path.name}'. "
+            "Untrusted or corrupt weights file detected. Standard models must match pinned hashes, "
+            "and custom models require CUSTOM_TRUSTED_MODEL_SHA256 or ALLOW_CUSTOM_UNPINNED_MODELS=true."
+        )
     if _model is None:
+        set_inference_priority()
         from ultralytics import YOLO
 
         _model = YOLO(str(model_path))
@@ -362,6 +407,9 @@ def analyse_image(image_path: Path, output_dir: Path) -> dict:
     frame = cv2.imread(str(image_path))
     if frame is None:
         raise ValueError("OpenCV could not read this image. Try a valid JPG or PNG file.")
+    h, w = frame.shape[:2]
+    if h > MAX_IMAGE_HEIGHT or w > MAX_IMAGE_WIDTH or (h * w) > MAX_IMAGE_PIXELS:
+        raise ValueError(f"Image dimensions ({w}x{h}) exceed safety limits.")
     annotated_filename = f"{image_path.stem}-annotated.jpg"
     result = _detect(frame, output_dir, annotated_filename)
     return {
@@ -389,8 +437,12 @@ def analyse_video(video_path: Path, output_dir: Path) -> dict:
     capture.set(cv2.CAP_PROP_POS_FRAMES, frame_count // 2)
     success, frame = capture.read()
     capture.release()
-    if not success:
+    if not success or frame is None:
         raise ValueError("Could not read a representative frame from the video.")
+
+    h, w = frame.shape[:2]
+    if h > MAX_IMAGE_HEIGHT or w > MAX_IMAGE_WIDTH or (h * w) > MAX_IMAGE_PIXELS:
+        raise ValueError(f"Video frame dimensions ({w}x{h}) exceed safety limits.")
 
     annotated_filename = f"{video_path.stem}-annotated.jpg"
     result = _detect(frame, output_dir, annotated_filename)

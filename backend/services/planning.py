@@ -3,6 +3,19 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+try:
+    from security_config import (
+        MAX_JUNCTION_NAME_LENGTH,
+        MAX_VEHICLE_COUNT,
+        sanitize_junction_name,
+    )
+except ImportError:
+    from backend.security_config import (
+        MAX_JUNCTION_NAME_LENGTH,
+        MAX_VEHICLE_COUNT,
+        sanitize_junction_name,
+    )
+
 DIRECTIONS = ("North", "South", "East", "West")
 DEFAULT_GREEN_BUDGET = 120
 DEFAULT_YELLOW_SECONDS = 3
@@ -14,10 +27,16 @@ def calculate_green_times(
     green_budget: int = DEFAULT_GREEN_BUDGET,
 ) -> dict[str, int]:
     """Allocate exact green_budget seconds proportionally with adaptive floor and cap."""
-    if set(counts) != set(DIRECTIONS):
+    if not isinstance(counts, dict) or set(counts) != set(DIRECTIONS):
         raise ValueError("Counts must include North, South, East, and West.")
-    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts.values()):
-        raise ValueError("Vehicle counts must be non-negative integers.")
+    for direction in DIRECTIONS:
+        val = counts[direction]
+        if isinstance(val, bool):
+            raise ValueError(f"Vehicle count for {direction} cannot be a boolean.")
+        if not isinstance(val, int) or val < 0:
+            raise ValueError(f"Vehicle count for {direction} must be a non-negative integer.")
+        if val > MAX_VEHICLE_COUNT:
+            raise ValueError(f"Vehicle count for {direction} ({val}) exceeds maximum limit ({MAX_VEHICLE_COUNT}).")
 
     green_budget = max(40, min(600, int(green_budget)))
     min_floor = max(5, int(green_budget * 0.10))
@@ -86,6 +105,7 @@ def create_signal_plan(
     yellow_seconds: int = DEFAULT_YELLOW_SECONDS,
     all_red_seconds: int = DEFAULT_ALL_RED_SECONDS,
 ) -> dict:
+    junction_name = sanitize_junction_name(junction_name)
     green_budget = max(40, min(600, int(green_budget)))
     yellow_seconds = max(1, min(10, int(yellow_seconds)))
     all_red_seconds = max(0, min(10, int(all_red_seconds)))
