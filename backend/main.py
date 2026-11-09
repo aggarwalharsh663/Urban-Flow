@@ -106,6 +106,12 @@ app = FastAPI(
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    if isinstance(exc, HTTPException):
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"detail": exc.detail},
+            headers=getattr(exc, "headers", None) or {},
+        )
     LOGGER.exception("Unhandled server exception on %s %s: %s", request.method, request.url.path, exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -307,6 +313,7 @@ async def _store_upload(file: UploadFile, allowed_suffixes: set[str]) -> tuple[P
 
     size = 0
     header_bytes = bytearray()
+    base_usage = GLOBAL_STORAGE_MANAGER.calculate_usage()
     try:
         GLOBAL_STORAGE_MANAGER.mark_active(temp_destination)
         with temp_destination.open("wb") as output:
@@ -317,7 +324,7 @@ async def _store_upload(file: UploadFile, allowed_suffixes: set[str]) -> tuple[P
                         status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                         detail="Upload exceeds the 100 MB limit.",
                     )
-                if GLOBAL_STORAGE_MANAGER.calculate_usage() + size > MAX_STORAGE_BYTES:
+                if base_usage + size > MAX_STORAGE_BYTES:
                     raise HTTPException(
                         status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
                         detail="Storage quota exceeded (500 MB limit reached).",
@@ -325,7 +332,6 @@ async def _store_upload(file: UploadFile, allowed_suffixes: set[str]) -> tuple[P
                 if len(header_bytes) < 32:
                     header_bytes.extend(chunk[: 32 - len(header_bytes)])
                 output.write(chunk)
-                output.flush()
 
         if size == 0:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The uploaded file is empty.")
