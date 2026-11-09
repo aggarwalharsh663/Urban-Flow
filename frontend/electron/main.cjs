@@ -709,6 +709,15 @@ app.whenReady().then(async () => {
   await workerReadyPromise.catch(() => {});
   createWindow();
 
+  // Prevent arbitrary webview attachment and enforce strict window opening policy
+  app.on('web-contents-created', (event, contents) => {
+    contents.on('will-attach-webview', (e) => {
+      e.preventDefault();
+      log('Blocked unauthorized webview attachment.');
+    });
+    contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  });
+
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();

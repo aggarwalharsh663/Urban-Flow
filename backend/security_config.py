@@ -548,6 +548,7 @@ class ProcessSharedRateLimiter:
                     ");"
                 )
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_rate_key_time ON rate_limits(key, timestamp);")
+            secure_file_permissions(self.db_path)
         except Exception as e:
             logger.warning("Could not initialize SQLite rate limiter (%s). Falling back to in-memory: %s", self.db_path, e)
             self._use_fallback = True

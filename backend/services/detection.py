@@ -232,6 +232,7 @@ def _write_annotated_frame(frame, detections: list[dict], output_path: Path) -> 
             cv2.LINE_AA,
         )
 
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(output_path), annotated):
         raise RuntimeError("Could not save the annotated frame.")
 

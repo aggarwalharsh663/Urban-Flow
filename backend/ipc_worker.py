@@ -104,9 +104,9 @@ def handle_simulate(data: dict) -> dict:
     counts = _validate_counts(data.get("counts", {}))
     raw_name = data.get("junction_name") or "Demo Junction"
     junction_name = sanitize_junction_name(raw_name)
-    green_budget = int(data.get("green_budget", DEFAULT_GREEN_BUDGET))
-    yellow_seconds = int(data.get("yellow_seconds", DEFAULT_YELLOW_SECONDS))
-    all_red_seconds = int(data.get("all_red_seconds", DEFAULT_ALL_RED_SECONDS))
+    green_budget = max(40, min(600, int(data.get("green_budget", DEFAULT_GREEN_BUDGET))))
+    yellow_seconds = max(1, min(10, int(data.get("yellow_seconds", DEFAULT_YELLOW_SECONDS))))
+    all_red_seconds = max(0, min(10, int(data.get("all_red_seconds", DEFAULT_ALL_RED_SECONDS))))
 
     report = create_signal_plan(
         counts,
@@ -123,9 +123,9 @@ def handle_calculate_signal_plan(data: dict) -> dict:
     counts = _validate_counts(data.get("counts", {}))
     raw_name = data.get("junction_name") or "Demo Junction"
     junction_name = sanitize_junction_name(raw_name)
-    green_budget = int(data.get("green_budget", DEFAULT_GREEN_BUDGET))
-    yellow_seconds = int(data.get("yellow_seconds", DEFAULT_YELLOW_SECONDS))
-    all_red_seconds = int(data.get("all_red_seconds", DEFAULT_ALL_RED_SECONDS))
+    green_budget = max(40, min(600, int(data.get("green_budget", DEFAULT_GREEN_BUDGET))))
+    yellow_seconds = max(1, min(10, int(data.get("yellow_seconds", DEFAULT_YELLOW_SECONDS))))
+    all_red_seconds = max(0, min(10, int(data.get("all_red_seconds", DEFAULT_ALL_RED_SECONDS))))
 
     report = create_signal_plan(
         counts,
@@ -176,9 +176,9 @@ def handle_analyse(data: dict, video: bool = False) -> dict:
         # Use shutil.copy2 for chunked file copy instead of full memory read
         shutil.copy2(src_path, dest_path)
 
-    green_budget = int(data.get("green_budget", DEFAULT_GREEN_BUDGET))
-    yellow_seconds = int(data.get("yellow_seconds", DEFAULT_YELLOW_SECONDS))
-    all_red_seconds = int(data.get("all_red_seconds", DEFAULT_ALL_RED_SECONDS))
+    green_budget = max(40, min(600, int(data.get("green_budget", DEFAULT_GREEN_BUDGET))))
+    yellow_seconds = max(1, min(10, int(data.get("yellow_seconds", DEFAULT_YELLOW_SECONDS))))
+    all_red_seconds = max(0, min(10, int(data.get("all_red_seconds", DEFAULT_ALL_RED_SECONDS))))
     raw_name = data.get("junction_name") or src_path.stem.replace("_", " ").title()
     junction_name = sanitize_junction_name(raw_name)
     use_cloud_ai = bool(data.get("use_cloud_ai", False))

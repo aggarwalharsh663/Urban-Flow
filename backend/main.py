@@ -152,7 +152,8 @@ async def require_auth(
         parts = authorization.strip().split()
         if len(parts) == 2 and parts[0].lower() == "bearer":
             candidate = parts[1]
-    if not candidate:
+    # Restrict query parameter token strictly to GET requests to prevent sensitive token leakage in POST/PUT URLs
+    if not candidate and request.method == "GET":
         candidate = api_token
 
     if not candidate or not verify_api_token(candidate):
