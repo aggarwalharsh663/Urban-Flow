@@ -389,6 +389,7 @@ ACTION_REQUIRED_SCOPES = {
     "update-counts": "reports:write",
     "analyse-image": "inference:write",
     "analyse-video": "inference:write",
+    "cancel": "admin",
 }
 
 
@@ -410,14 +411,10 @@ def get_expected_ipc_tokens() -> list[str]:
 
 def verify_ipc_auth(req: dict) -> tuple[bool, str]:
     """
-    Validate caller token using constant-time comparison and check required action scope (U-02).
+    Validate caller token using constant-time comparison and check required action scope (U-02, V-02).
     Returns (is_authorized, error_message).
     """
     action = req.get("action")
-    if action == "cancel":
-        # Cancellation is permitted to abort active tasks
-        return True, ""
-
     required_scope = ACTION_REQUIRED_SCOPES.get(action)
     if not required_scope:
         return False, f"Unknown action: {action}"

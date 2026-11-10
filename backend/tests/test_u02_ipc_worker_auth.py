@@ -97,13 +97,28 @@ def test_ipc_worker_sufficient_scope_accepted(setup_ipc_env):
 
 
 def test_ipc_worker_unauthenticated_action_permitted():
-    """Cancellation actions can be dispatched without credentials."""
+    """Unauthenticated cancel actions are rejected without session credentials (V-02)."""
     req = {
-        "id": "req-cancel",
+        "id": "req-cancel-unauth",
         "action": "cancel",
         "data": {"cancel_id": "test_job_cancel_999"}
     }
     res = ipc_worker.process_ipc_request(req)
-    assert res["id"] == "req-cancel"
+    assert res["id"] == "req-cancel-unauth"
+    assert res["ok"] is False
+    assert "Unauthorized" in res["error"]
+
+
+def test_ipc_worker_authenticated_cancel_permitted(setup_ipc_env):
+    """Cancellation actions succeed when dispatched with valid session credentials (V-02)."""
+    session_token = setup_ipc_env
+    req = {
+        "id": "req-cancel-auth",
+        "action": "cancel",
+        "token": session_token,
+        "data": {"cancel_id": "test_job_cancel_999"}
+    }
+    res = ipc_worker.process_ipc_request(req)
+    assert res["id"] == "req-cancel-auth"
     assert res["ok"] is True
     assert res["result"].get("cancelled") == "test_job_cancel_999"
