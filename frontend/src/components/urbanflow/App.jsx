@@ -6,7 +6,7 @@ import {
   Sparkles, UploadCloud, Video, X,
 } from "lucide-react";
 
-const API = import.meta.env.VITE_API_URL || "";
+const API = "";
 const TrafficChart = lazy(() => import("./TrafficChart.jsx"));
 const DIRECTIONS = ["North", "South", "East", "West"];
 const COLORS = { North: "oklch(0.85 0.17 88)", South: "oklch(0.62 0.15 255)", East: "oklch(0.66 0.2 28)", West: "oklch(0.68 0.15 150)" };
@@ -19,12 +19,9 @@ const PRESETS = {
 };
 
 function getAuthToken() {
-  // R2 & V-01: Persistent browser storage (localStorage) and global window token exposure are eliminated.
-  // In browser dev mode, API requests can be proxied by Vite dev server attaching the token server-side.
-  // In desktop Electron mode, authentication is handled natively in the main process over portless IPC.
-  if (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_TOKEN) {
-    return import.meta.env.VITE_API_TOKEN;
-  }
+  // W-01: Master token inlining eliminated. In browser dev mode, API requests are
+  // proxied through the Vite dev server which attaches authentication server-side.
+  // In desktop Electron mode, operations are handled natively in the main process over portless IPC.
   return "";
 }
 
@@ -713,7 +710,7 @@ export default function App() {
   const showReport = (nextReport) => { setReport(nextReport); if (nextReport?.cycle?.total_green_seconds) setGreenBudget(nextReport.cycle.total_green_seconds); setTimeout(() => { const el = document.getElementById("results"); if (el) { el.scrollIntoView({ behavior: "smooth", block: "start" }); } }, 120); };
   return <div id="top" className="app-shell" data-theme={theme}><Header health={health} theme={theme} onToggleTheme={() => setTheme((current) => current === "dark" ? "light" : "dark")} />
     {health?.apiAvailable === false && <div className="setup-notice" role="status"><Info size={17} /><div><strong>Backend is not running</strong><p>Open PowerShell in the project folder and run <code>.\start-local.ps1</code>. This starts the API and website.</p></div><button type="button" onClick={() => window.location.reload()} aria-label="Retry backend connection"><RotateCcw size={15} />Retry</button></div>}
-    {health?.authRequired && <div className="setup-notice setup-notice-warning" role="alert"><Info size={17} /><div><strong>Authentication required</strong><p>Check local dev token configuration. Run <code>start.bat</code> to launch with the authenticated local dev token, or set <code>VITE_API_TOKEN</code> in your environment.</p></div></div>}
+    {health?.authRequired && <div className="setup-notice setup-notice-warning" role="alert"><Info size={17} /><div><strong>Authentication required</strong><p>Check local dev token configuration. Run <code>start.bat</code> to launch with the authenticated local dev proxy, or verify backend authentication.</p></div></div>}
     {health?.apiAvailable && (!health.computerVisionReady || !health.modelAvailable) && <div className="setup-notice setup-notice-warning" role="status"><Info size={17} /><div><strong>{!health.computerVisionReady ? "Image/video analysis needs setup" : "Local YOLO model is missing"}</strong><p>{!health.computerVisionReady ? `Missing packages: ${health.missingDependencies.join(", ") || "OpenCV and Ultralytics"}. Run .\\backend\\setup.ps1, then restart the backend.` : "Download yolov8n.pt into backend\\, then restart the backend. Simulated counts are ready now."}</p></div></div>}
     <main><Dashboard report={report} setJunctionName={setJunctionName} /><AnalysisSection onReport={showReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={(b) => { setGreenBudget(b); if (report) { setReport(updateReportBudget(report, b)); if (report.report_id) { request(`/api/reports/${report.report_id}/cycle`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ green_budget: b }) }).then(setReport).catch(() => {}); } } }} health={health} /><Results report={report} onUpdateReport={setReport} /><Safety /></main><footer className="footer"><a className="brand footer-brand" href="#top" aria-label="UrbanFlow home"><img src={theme === "light" ? "/urban-flow-light.png" : "/urban-flow-dark.png"} alt="UrbanFlow" /></a><span>Computer vision · Local YOLOv8 & Optional Gemini · Transparent Privacy</span><a href="#safety">Safety & limitations <ArrowUp size={13} /></a></footer></div>;
 }

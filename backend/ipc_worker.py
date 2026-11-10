@@ -531,6 +531,12 @@ def main():
                     req = json.loads(line)
                     action = req.get("action")
                     if action == "cancel":
+                        # W-02: Validate session credentials before executing cancellation in reader thread
+                        is_auth, err_msg = verify_ipc_auth(req)
+                        if not is_auth:
+                            if req.get("id"):
+                                print(json.dumps({"id": req.get("id"), "ok": False, "error": err_msg or "Unauthorized: invalid IPC token or insufficient scope"}), flush=True)
+                            continue
                         handle_cancel(req.get("data") or {})
                         if req.get("id"):
                             print(json.dumps({"id": req.get("id"), "ok": True, "result": {"cancelled": True}}), flush=True)
