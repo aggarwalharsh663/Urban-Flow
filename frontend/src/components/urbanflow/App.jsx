@@ -19,7 +19,8 @@ const PRESETS = {
 };
 
 function getAuthToken() {
-  // R2: Persistent browser storage (localStorage) and global window token exposure are eliminated.
+  // R2 & V-01: Persistent browser storage (localStorage) and global window token exposure are eliminated.
+  // In browser dev mode, API requests can be proxied by Vite dev server attaching the token server-side.
   // In desktop Electron mode, authentication is handled natively in the main process over portless IPC.
   if (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_TOKEN) {
     return import.meta.env.VITE_API_TOKEN;

@@ -29,7 +29,9 @@ if not exist "node_modules\.bin\vite.cmd" (
     exit /b 1
 )
 
-REM Retrieve dev token if backend Python runtime is available (U-01)
+REM Retrieve dev token if backend Python runtime is available (U-01 & V-01)
+REM URBAN_FLOW_DEV_TOKEN is attached server-side by Vite proxy without leaking into client JS
+set "URBAN_FLOW_DEV_TOKEN="
 set "VITE_API_TOKEN="
 set "PY_EXE="
 if exist "%~dp0..\backend\python\python.exe" (
@@ -40,13 +42,14 @@ if exist "%~dp0..\backend\python\python.exe" (
 
 if defined PY_EXE (
     for /f "tokens=*" %%T in ('""!PY_EXE!" -c "import sys; sys.path.insert(0, r'%~dp0..\backend'); import security_config; print(security_config.get_or_create_api_token())""') do (
+        set "URBAN_FLOW_DEV_TOKEN=%%T"
         set "VITE_API_TOKEN=%%T"
     )
 )
 
 set "VITE_API_URL=http://127.0.0.1:8000"
 echo Starting the Urban Flow frontend at http://127.0.0.1:5174
-echo Connecting to API at http://127.0.0.1:8000
+echo Connecting to API at http://127.0.0.1:8000 (Proxy active)
 npm.cmd run dev -- --host 127.0.0.1 --port 5174 --strictPort
 if errorlevel 1 (
     echo.

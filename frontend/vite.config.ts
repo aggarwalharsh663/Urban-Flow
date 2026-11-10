@@ -12,4 +12,35 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  vite: {
+    server: {
+      // Proxy API and upload calls in local dev mode so the token is attached server-side (V-01 Option A)
+      proxy: {
+        "/api": {
+          target: process.env.VITE_BACKEND_URL || "http://127.0.0.1:8000",
+          changeOrigin: true,
+          configure: (proxy) => {
+            proxy.on("proxyReq", (proxyReq) => {
+              const devToken = process.env.URBAN_FLOW_DEV_TOKEN || process.env.VITE_API_TOKEN;
+              if (devToken && !proxyReq.getHeader("X-API-Token")) {
+                proxyReq.setHeader("X-API-Token", devToken);
+              }
+            });
+          },
+        },
+        "/uploads": {
+          target: process.env.VITE_BACKEND_URL || "http://127.0.0.1:8000",
+          changeOrigin: true,
+          configure: (proxy) => {
+            proxy.on("proxyReq", (proxyReq) => {
+              const devToken = process.env.URBAN_FLOW_DEV_TOKEN || process.env.VITE_API_TOKEN;
+              if (devToken && !proxyReq.getHeader("X-API-Token")) {
+                proxyReq.setHeader("X-API-Token", devToken);
+              }
+            });
+          },
+        },
+      },
+    },
+  },
 });

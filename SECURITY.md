@@ -31,6 +31,10 @@ Urban Flow implements a defense-in-depth security architecture covering scoped A
 - **No Query-String Secrets (R2)**: Ordinary API endpoints reject tokens in URL query strings. Authentication is strictly accepted via `X-API-Token` header or `Authorization: Bearer <token>`.
 - **Media Preview Tickets**: Web `<img>` previews use short-lived HMAC tickets (`generate_media_ticket`) valid for 5 minutes, eliminating master token exposure in URLs, browser history, or server access logs.
 - **Timing Defense**: All token and ticket verifications use constant-time comparison (`secrets.compare_digest`).
+- **Development Token & Proxy Architecture (V-01)**:
+  - In browser development mode (`npm run dev`), the Vite dev server proxies API calls (`/api/*` and `/uploads/*`) to the backend and attaches the token server-side via `URBAN_FLOW_DEV_TOKEN` in Node.js, preventing the master token from being inlined into served client JavaScript.
+  - **Loopback Threat Model**: The development token in local web dev mode is a loopback convenience designed to prevent unauthorized external cross-origin requests; it is not kept secret from other local processes operating with user privileges on the host machine.
+  - **Production Desktop Guarantee**: In production desktop distribution (the primary application target), Electron operates without network ports over `app://urbanflow`, utilizing context-isolated IPC and DPAPI encryption at rest with no dev server or client bundle token exposure.
 
 ---
 
