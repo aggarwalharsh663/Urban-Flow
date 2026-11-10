@@ -5,7 +5,8 @@ import sys
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parents[1]
-FRONTEND_DIR = BASE_DIR.parent / "frontend"
+ROOT_DIR = BASE_DIR.parent
+FRONTEND_DIR = ROOT_DIR / "frontend"
 
 
 def test_w01_frontend_source_has_no_vite_api_token_references():
@@ -34,6 +35,52 @@ def test_w01_vite_proxy_configuration():
     assert '"/uploads"' in content
     assert "URBAN_FLOW_DEV_TOKEN" in content
     assert "proxyReq.setHeader" in content
+
+
+def test_w01_mock_vite_dev_server_asset_leak():
+    """Simulate Vite dev server and bundle inspection: URBAN_FLOW_DEV_TOKEN must never leak into client scripts (W-01)."""
+    test_token = "secret_test_token_12345"
+    test_script = FRONTEND_DIR / "test" / "frontend_token_leak.test.mjs"
+    assert test_script.exists(), "frontend_token_leak.test.mjs must exist"
+
+    env = os.environ.copy()
+    env["URBAN_FLOW_DEV_TOKEN"] = test_token
+    env.pop("VITE_API_TOKEN", None)
+
+    # Execute Node.js mock Vite dev server leak test
+    result = subprocess.run(
+        ["node", str(test_script)],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT_DIR),
+        env=env,
+        timeout=15,
+    )
+    assert result.returncode == 0, f"Frontend token leak test failed:\n{result.stderr}\n{result.stdout}"
+    assert "ALL FRONTEND ASSET LEAK CHECKS PASSED" in result.stdout
+
+    # In addition, assert directly on all client dist bundles that test_token is never present
+    client_dist = FRONTEND_DIR / "dist" / "client"
+    if client_dist.exists():
+        for asset in client_dist.rglob("*.js"):
+            content = asset.read_text(encoding="utf-8", errors="ignore")
+            assert test_token not in content, f"Secret token leaked into bundle: {asset.name}"
+            assert "VITE_API_TOKEN" not in content, f"VITE_API_TOKEN found in bundle: {asset.name}"
+
+
+def test_v03_launcher_scripts_warn_on_missing_python():
+    """Launchers (run-frontend.bat, start.bat) must warn if Python runtime is not found (V-03)."""
+    # 1. run-frontend.bat check
+    run_frontend = FRONTEND_DIR / "run-frontend.bat"
+    content_fe = run_frontend.read_text(encoding="utf-8")
+    expected_fe_warn = "dev token not provisioned - run start.bat or create the backend venv"
+    assert expected_fe_warn in content_fe, "run-frontend.bat is missing V-03 warning block"
+
+    # 2. start.bat check
+    start_bat = ROOT_DIR / "start.bat"
+    content_start = start_bat.read_text(encoding="utf-8")
+    assert "if not defined VENV_PYTHON" in content_start, "start.bat is missing python check"
+    assert "[ERROR] Python was not found." in content_start, "start.bat is missing missing-python warning"
 
 
 def test_w02_reader_thread_cancel_requires_authentication():
