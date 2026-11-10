@@ -199,6 +199,12 @@ class TestR2TokenStorageAndTransmission:
         assert "cmd /k set URBAN_FLOW_API_TOKEN=" not in content
         assert "VITE_API_TOKEN" not in content
 
+    def test_run_frontend_bat_warns_when_python_not_found(self):
+        """run-frontend.bat must warn if python environment is missing (V-03)."""
+        run_frontend = BASE_DIR.parent / "frontend" / "run-frontend.bat"
+        content = run_frontend.read_text(encoding="utf-8", errors="ignore")
+        assert "dev token not provisioned - run start.bat or create the backend venv" in content
+
 
 # ==============================================================================
 # R3: Hardened Unauthenticated Endpoints

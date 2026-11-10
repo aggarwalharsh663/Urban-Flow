@@ -45,6 +45,8 @@ if defined PY_EXE (
         set "URBAN_FLOW_DEV_TOKEN=%%T"
         set "VITE_API_TOKEN=%%T"
     )
+) else (
+    echo dev token not provisioned - run start.bat or create the backend venv
 )
 
 set "VITE_API_URL=http://127.0.0.1:8000"
