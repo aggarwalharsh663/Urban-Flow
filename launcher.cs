@@ -1,7 +1,23 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
+
+[assembly: AssemblyTitle("Urban Flow")]
+[assembly: AssemblyDescription("Urban Flow Adaptive Traffic Signal System")]
+[assembly: AssemblyConfiguration("Release")]
+[assembly: AssemblyCompany("Urban Flow")]
+[assembly: AssemblyProduct("Urban Flow Desktop Application")]
+[assembly: AssemblyCopyright("Copyright © 2026 Harsh Aggarwal")]
+[assembly: AssemblyTrademark("Urban Flow")]
+[assembly: AssemblyCulture("")]
+[assembly: ComVisible(false)]
+[assembly: Guid("8B8159E5-FA49-4B52-8703-9A924654921E")]
+[assembly: AssemblyVersion("1.0.0.0")]
+[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyInformationalVersion("1.0.0")]
 
 namespace UrbanFlowLauncher
 {
