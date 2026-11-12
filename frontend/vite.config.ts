@@ -14,6 +14,9 @@ export default defineConfig({
   },
   vite: {
     server: {
+      host: "127.0.0.1",
+      port: 5174,
+      strictPort: true,
       // Proxy API and upload calls in local dev mode so the token is attached server-side (V-01 Option A)
       proxy: {
         "/api": {

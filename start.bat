@@ -59,6 +59,10 @@ if not exist "%~dp0frontend\node_modules" (
     echo [INFO] Installing frontend dependencies...
     cd /d "%~dp0frontend"
     call npm install
+    if errorlevel 1 (
+        echo [WARNING] npm install did not complete successfully.
+        echo           If your firewall blocks outbound npm connections, ensure frontend\node_modules is pre-installed.
+    )
     cd /d "%~dp0"
 )
 

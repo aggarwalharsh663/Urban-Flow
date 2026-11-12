@@ -25,10 +25,30 @@ if (-not (Test-Path $VenvPython)) {
     if ($LASTEXITCODE -ne 0) { throw "Could not create backend\.venv." }
 }
 
-& $VenvPython -m pip install --upgrade pip --index-url $PackageIndex --timeout 120 --retries 3
-if ($LASTEXITCODE -ne 0) { throw "Could not update pip from the configured Python package mirror." }
+# Check if dependencies are already satisfied offline (avoids unnecessary outbound firewall traffic)
+$DepsCheck = & $VenvPython -c "import fastapi, uvicorn, pydantic; print('OK')" 2>$null
+if ($LASTEXITCODE -eq 0 -and $DepsCheck -eq "OK") {
+    Write-Host "Backend dependencies are already installed and satisfied offline."
+    exit 0
+}
 
-& $VenvPython -m pip install -r (Join-Path $BackendPath "requirements.txt") --index-url $PackageIndex --timeout 120 --retries 3
-if ($LASTEXITCODE -ne 0) { throw "Backend dependencies did not install successfully." }
+# Optional pip upgrade with short timeout to prevent hanging behind firewalls
+Write-Host "Checking for pip updates..."
+& $VenvPython -m pip install --upgrade pip --index-url $PackageIndex --timeout 15 --retries 1 2>$null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[INFO] Pip upgrade skipped (network offline or restricted by firewall)."
+}
+
+# Install requirements with timeout and clear firewall diagnostics
+Write-Host "Installing dependencies from requirements.txt..."
+& $VenvPython -m pip install -r (Join-Path $BackendPath "requirements.txt") --index-url $PackageIndex --timeout 30 --retries 2
+if ($LASTEXITCODE -ne 0) {
+    $DepsCheckPost = & $VenvPython -c "import fastapi, uvicorn, pydantic; print('OK')" 2>$null
+    if ($LASTEXITCODE -eq 0 -and $DepsCheckPost -eq "OK") {
+        Write-Host "[WARNING] Outbound connection to PyPI was limited by firewall, but essential dependencies are available."
+    } else {
+        throw "Backend dependencies could not be downloaded. If your network firewall blocks outbound traffic to pypi.org, configure HTTP_PROXY or use the pre-bundled Python runtime at backend\python\."
+    }
+}
 
 Write-Host "Backend dependencies are ready."

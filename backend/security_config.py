@@ -869,7 +869,15 @@ def save_report_atomic(report: dict, report_dir: Path, source_channel: str = "ap
                 json.dump(report, f, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(temp_path, target_path)
+            # On Windows, os.replace can encounter transient sharing locks under concurrent access
+            for attempt in range(10):
+                try:
+                    os.replace(temp_path, target_path)
+                    break
+                except PermissionError:
+                    if attempt == 9:
+                        raise
+                    time.sleep(0.05 * (attempt + 1))
         except Exception:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
