@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows.Forms;
 
 [assembly: AssemblyTitle("Urban Flow")]
@@ -23,6 +24,16 @@ namespace UrbanFlowLauncher
 {
     static class Program
     {
+        private const string MutexName = "Local\\UrbanFlow_Application_SingleInstance_Mutex";
+        private const int SW_RESTORE = 9;
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool DeleteFile(string lpFileName);
@@ -43,58 +54,125 @@ namespace UrbanFlowLauncher
             }
         }
 
-        [STAThread]
-        static void Main()
+        private static void ActivateExistingInstance()
         {
             try
             {
-                string appDir = AppDomain.CurrentDomain.BaseDirectory;
-
-                // Unblock launcher executable itself if extracted from a web download archive
-                try
+                Process current = Process.GetCurrentProcess();
+                foreach (Process proc in Process.GetProcessesByName("Urban Flow"))
                 {
-                    string currentExe = Process.GetCurrentProcess().MainModule.FileName;
-                    UnblockFile(currentExe);
+                    if (proc.Id != current.Id && proc.MainWindowHandle != IntPtr.Zero)
+                    {
+                        ShowWindowAsync(proc.MainWindowHandle, SW_RESTORE);
+                        SetForegroundWindow(proc.MainWindowHandle);
+                        return;
+                    }
                 }
-                catch { }
+            }
+            catch { }
+        }
 
-                string frontendDir = Path.Combine(appDir, "frontend");
-                string electronExe = Path.Combine(frontendDir, "node_modules", "electron", "dist", "electron.exe");
+        private static string LocateElectronExecutable(string baseDir, out string workingDir)
+        {
+            // 1. Direct frontend bundle in application directory
+            string localFrontend = Path.Combine(baseDir, "frontend");
+            string localElectron = Path.Combine(localFrontend, "node_modules", "electron", "dist", "electron.exe");
+            if (File.Exists(localElectron))
+            {
+                workingDir = localFrontend;
+                return localElectron;
+            }
 
-                if (!File.Exists(electronExe))
+            // 2. Installed AppData/Local path fallback
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            string appDataFrontend = Path.Combine(localAppData, "Programs", "Urban Flow", "frontend");
+            string appDataElectron = Path.Combine(appDataFrontend, "node_modules", "electron", "dist", "electron.exe");
+            if (File.Exists(appDataElectron))
+            {
+                workingDir = appDataFrontend;
+                return appDataElectron;
+            }
+
+            workingDir = localFrontend;
+            return null;
+        }
+
+        [STAThread]
+        static void Main(string[] args)
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+
+            // Single-Instance Mutex: prevents duplicate instances and orphaned process cascades
+            bool createdNew;
+            using (Mutex mutex = new Mutex(true, MutexName, out createdNew))
+            {
+                if (!createdNew)
                 {
-                    MessageBox.Show(
-                        "Urban Flow application files are incomplete.\n\n" +
-                        "Missing: " + electronExe + "\n\n" +
-                        "Please run 'Urban Flow Setup.exe' again to install all required components.",
-                        "Urban Flow - Missing Component",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning
-                    );
+                    ActivateExistingInstance();
                     return;
                 }
 
-                // Unblock Electron executable before launch
-                UnblockFile(electronExe);
+                try
+                {
+                    string appDir = AppDomain.CurrentDomain.BaseDirectory;
 
-                ProcessStartInfo psi = new ProcessStartInfo();
-                psi.FileName = electronExe;
-                psi.Arguments = ".";
-                psi.WorkingDirectory = frontendDir;
-                psi.WindowStyle = ProcessWindowStyle.Normal;
-                psi.CreateNoWindow = false;
-                psi.UseShellExecute = false;
+                    // Unblock launcher executable itself if extracted from a web download archive
+                    try
+                    {
+                        string currentExe = Process.GetCurrentProcess().MainModule.FileName;
+                        UnblockFile(currentExe);
+                    }
+                    catch { }
 
-                Process.Start(psi);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(
-                    "Unable to launch Urban Flow:\n\n" + ex.Message,
-                    "Urban Flow Launch Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error
-                );
+                    string workingDir;
+                    string electronExe = LocateElectronExecutable(appDir, out workingDir);
+
+                    if (string.IsNullOrEmpty(electronExe) || !File.Exists(electronExe))
+                    {
+                        MessageBox.Show(
+                            "Urban Flow application components are not yet installed.\n\n" +
+                            "Missing: " + Path.Combine(workingDir, "node_modules", "electron", "dist", "electron.exe") + "\n\n" +
+                            "Please run 'start.bat' or the Urban Flow installer to complete setup.",
+                            "Urban Flow - Component Not Found",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning
+                        );
+                        return;
+                    }
+
+                    // Unblock Electron executable before launch
+                    UnblockFile(electronExe);
+
+                    // Build arguments forwarding
+                    string forwardArgs = ".";
+                    if (args != null && args.Length > 0)
+                    {
+                        forwardArgs = ". " + string.Join(" ", args);
+                    }
+
+                    ProcessStartInfo psi = new ProcessStartInfo();
+                    psi.FileName = electronExe;
+                    psi.Arguments = forwardArgs;
+                    psi.WorkingDirectory = workingDir;
+                    psi.WindowStyle = ProcessWindowStyle.Normal;
+                    psi.CreateNoWindow = false;
+                    psi.UseShellExecute = false;
+
+                    using (Process child = Process.Start(psi))
+                    {
+                        // Clean launch handoff
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(
+                        "Unable to launch Urban Flow:\n\n" + ex.Message,
+                        "Urban Flow Launch Error",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error
+                    );
+                }
             }
         }
     }
