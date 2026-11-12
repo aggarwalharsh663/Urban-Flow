@@ -6,6 +6,9 @@ echo ============================================================
 echo  Urban Flow - Starting System
 echo ============================================================
 
+REM Automatically clear web-download block (Zone.Identifier stream) if extracted from archive
+powershell.exe -NoProfile -NonInteractive -Command "Get-ChildItem -LiteralPath '%~dp0' -Recurse -File -Include *.exe,*.dll,*.bat,*.ps1,*.vbs,*.js,*.cjs,*.mjs | Unblock-File -ErrorAction SilentlyContinue" >nul 2>&1
+
 REM 1. Identify Python Runtime
 set "VENV_PYTHON="
 if exist "%~dp0backend\python\python.exe" (

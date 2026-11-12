@@ -23,12 +23,41 @@ namespace UrbanFlowLauncher
 {
     static class Program
     {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DeleteFile(string lpFileName);
+
+        private static void UnblockFile(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    // Deletes NTFS Zone.Identifier stream (Mark of the Web) to prevent SmartScreen popups
+                    DeleteFile(path + ":Zone.Identifier");
+                }
+            }
+            catch
+            {
+                // Silently ignore if not on NTFS or stream absent
+            }
+        }
+
         [STAThread]
         static void Main()
         {
             try
             {
                 string appDir = AppDomain.CurrentDomain.BaseDirectory;
+
+                // Unblock launcher executable itself if extracted from a web download archive
+                try
+                {
+                    string currentExe = Process.GetCurrentProcess().MainModule.FileName;
+                    UnblockFile(currentExe);
+                }
+                catch { }
+
                 string frontendDir = Path.Combine(appDir, "frontend");
                 string electronExe = Path.Combine(frontendDir, "node_modules", "electron", "dist", "electron.exe");
 
@@ -44,6 +73,9 @@ namespace UrbanFlowLauncher
                     );
                     return;
                 }
+
+                // Unblock Electron executable before launch
+                UnblockFile(electronExe);
 
                 ProcessStartInfo psi = new ProcessStartInfo();
                 psi.FileName = electronExe;
