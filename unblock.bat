@@ -8,7 +8,7 @@ echo ============================================================
 echo.
 echo Removing Windows Mark-of-the-Web security blocks from project files...
 
-powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+powershell.exe -NoProfile -NonInteractive -Command ^
   "Write-Host 'Scanning files...'; " ^
   "$files = Get-ChildItem -LiteralPath '%~dp0' -Recurse -File -Include *.exe,*.dll,*.bat,*.ps1,*.vbs,*.js,*.cjs,*.mjs,*.json; " ^
   "$count = 0; " ^
