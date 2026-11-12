@@ -131,3 +131,20 @@ FastAPI and Electron inject:
   - Command-line debug parameters and `--reload` flags are completely removed from production launchers.
 - **Development Launcher (`run-backend-dev.ps1`)**:
   - Isolated dedicated script for local contributors. Requires explicit `URBAN_FLOW_ENV=development` confirmation.
+
+---
+
+## 11. Windows Executable Security & UAC Manifest Hardening (Issue 12)
+
+- **Embedded Application Manifest (`app.manifest`)**:
+  - `Urban Flow.exe` embeds an application manifest into PE resource `RT_MANIFEST` (ID 1) via the `/win32manifest:app.manifest` compiler flag in `build-launcher.bat`.
+  - Declares `<requestedExecutionLevel level="asInvoker" uiAccess="false" />` under `<trustInfo>`.
+  - In Windows, embedding `<trustInfo>` explicitly marks the binary as UAC-aware, instructing the Windows Application Information (`Appinfo`) service to disable legacy **Installer Detection Heuristics** (which otherwise prompt for elevation or block execution if filenames or metadata match installer keywords).
+- **Target OS Compatibility**:
+  - Declares `<supportedOS>` compatibility GUIDs for Windows 10/11, Windows 8.1, Windows 8, and Windows 7, preventing Windows Compatibility Shim engine from misclassifying or throttling the application.
+- **Modern Desktop Settings**:
+  - Declares `PerMonitorV2` DPI awareness, `longPathAware`, and `Microsoft.Windows.Common-Controls` 6.0.0.0 dependency.
+- **PE Metadata Hygiene**:
+  - Assembly attributes in `launcher.cs` strictly avoid trigger keywords (`setup`, `installer`, `patch`) in `AssemblyTitle`, `AssemblyProduct`, and `AssemblyDescription`.
+- **Least-Privilege Process Hierarchy**:
+  - Child processes (backend server, Electron UI) are launched without elevated verbs (`runas`), preserving least privilege and avoiding unexpected administrative elevation blocks.
