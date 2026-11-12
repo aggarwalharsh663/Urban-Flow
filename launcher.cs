@@ -74,7 +74,7 @@ namespace UrbanFlowLauncher
 
         private static string LocateElectronExecutable(string baseDir, out string workingDir)
         {
-            // 1. Direct frontend bundle in application directory
+            // 1. Direct local bundle relative to running launcher (portable / root execution)
             string localFrontend = Path.Combine(baseDir, "frontend");
             string localElectron = Path.Combine(localFrontend, "node_modules", "electron", "dist", "electron.exe");
             if (File.Exists(localElectron))
@@ -83,7 +83,33 @@ namespace UrbanFlowLauncher
                 return localElectron;
             }
 
-            // 2. Installed AppData/Local path fallback
+            // 2. Program Files (Machine-wide installation trusted by AppLocker / Software Restriction Policies)
+            string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            if (!string.IsNullOrEmpty(progFiles))
+            {
+                string pfFrontend = Path.Combine(progFiles, "Urban Flow", "frontend");
+                string pfElectron = Path.Combine(pfFrontend, "node_modules", "electron", "dist", "electron.exe");
+                if (File.Exists(pfElectron))
+                {
+                    workingDir = pfFrontend;
+                    return pfElectron;
+                }
+            }
+
+            // 3. Program Files (x86)
+            string progFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            if (!string.IsNullOrEmpty(progFilesX86))
+            {
+                string pfx86Frontend = Path.Combine(progFilesX86, "Urban Flow", "frontend");
+                string pfx86Electron = Path.Combine(pfx86Frontend, "node_modules", "electron", "dist", "electron.exe");
+                if (File.Exists(pfx86Electron))
+                {
+                    workingDir = pfx86Frontend;
+                    return pfx86Electron;
+                }
+            }
+
+            // 4. Per-user LocalAppData fallback
             string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             string appDataFrontend = Path.Combine(localAppData, "Programs", "Urban Flow", "frontend");
             string appDataElectron = Path.Combine(appDataFrontend, "node_modules", "electron", "dist", "electron.exe");
