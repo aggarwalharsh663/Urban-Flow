@@ -102,21 +102,97 @@ function DirectionIcon({ direction, size = 18 }) {
   return <Icon size={size} strokeWidth={2.2} />;
 }
 
-function Header({ health, theme, onToggleTheme }) {
+function Header({ health, theme, onToggleTheme, activeNav = "dashboard", onNavClick }) {
   const apiAvailable = health?.apiAvailable;
+
+  const handleNavClick = (e, targetId, navKey) => {
+    e.preventDefault();
+    if (onNavClick) onNavClick(navKey);
+    const target = document.getElementById(targetId);
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    if (window.history?.pushState) {
+      window.history.pushState(null, "", `#${targetId}`);
+    }
+  };
+
   return (
     <header className="topbar">
-      <a className="brand" href="#top" aria-label="Adaptive Traffic Signal System home">
-        <img src={theme === "light" ? "/urban-flow-light.png" : "/urban-flow-dark.png"} alt="UrbanFlow — Adaptive Traffic Signal System" />
+      <a
+        className="brand"
+        href="#top"
+        onClick={(e) => handleNavClick(e, "dashboard", "dashboard")}
+        aria-label="Adaptive Traffic Signal System home"
+      >
+        <img
+          src={theme === "light" ? "/urban-flow-light.png" : "/urban-flow-dark.png"}
+          alt="UrbanFlow — Adaptive Traffic Signal System"
+        />
       </a>
-      <nav className="top-nav"><a className="active" href="#dashboard">Dashboard</a><a href="#analysis">Analysis</a><a href="#safety">Safety & limits</a></nav>
+      <nav className="top-nav" aria-label="Main Navigation">
+        <a
+          className={activeNav === "dashboard" ? "active" : ""}
+          href="#dashboard"
+          onClick={(e) => handleNavClick(e, "dashboard", "dashboard")}
+        >
+          Dashboard
+        </a>
+        <a
+          className={activeNav === "analysis" ? "active" : ""}
+          href="#analysis"
+          onClick={(e) => handleNavClick(e, "analysis", "analysis")}
+        >
+          Analysis
+        </a>
+        <a
+          className={activeNav === "safety" ? "active" : ""}
+          href="#safety"
+          onClick={(e) => handleNavClick(e, "safety", "safety")}
+        >
+          Safety & limits
+        </a>
+      </nav>
       <div className="topbar-actions">
-        <button className="theme-toggle" type="button" onClick={onToggleTheme} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} view`} title={`Switch to ${theme === "dark" ? "light" : "dark"} view`}>
-          {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}<span>{theme === "dark" ? "Light" : "Dark"}</span>
+        <button
+          className="theme-toggle"
+          type="button"
+          onClick={onToggleTheme}
+          aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} view`}
+          title={`Switch to ${theme === "dark" ? "light" : "dark"} view`}
+        >
+          {theme === "dark" ? <Sun size={15} /> : <Moon size={15} />}
+          <span>{theme === "dark" ? "Light" : "Dark"}</span>
         </button>
-        <div className={`local-status ${health?.authRequired ? "auth-required" : health?.apiAvailable && !health?.computerVisionReady ? "vision-unavailable" : ""}`}>
-          <span className={`status-dot ${!apiAvailable || health?.authRequired || (health?.apiAvailable && !health?.computerVisionReady) ? "offline" : ""}`} />
-          {health === null ? "Checking local API" : !apiAvailable ? "API unavailable" : health?.authRequired ? "Authentication required: Check local dev token configuration" : !health.computerVisionReady ? "Simulation ready · vision setup needed" : !health.modelAvailable ? "Local model needed" : "Local system online"}
+        <div
+          className={`local-status ${
+            health?.authRequired
+              ? "auth-required"
+              : health?.apiAvailable && !health?.computerVisionReady
+              ? "vision-unavailable"
+              : ""
+          }`}
+        >
+          <span
+            className={`status-dot ${
+              !apiAvailable ||
+              health?.authRequired ||
+              (health?.apiAvailable && !health?.computerVisionReady)
+                ? "offline"
+                : ""
+            }`}
+          />
+          {health === null
+            ? "Checking local API"
+            : !apiAvailable
+            ? "API unavailable"
+            : health?.authRequired
+            ? "Authentication required: Check local dev token configuration"
+            : !health.computerVisionReady
+            ? "Simulation ready · vision setup needed"
+            : !health.modelAvailable
+            ? "Local model needed"
+            : "Local system online"}
         </div>
       </div>
     </header>
@@ -661,6 +737,65 @@ export default function App() {
   const [greenBudget, setGreenBudget] = useState(120);
   const [health, setHealth] = useState(null);
   const [theme, setTheme] = useState("dark");
+  const [activeNav, setActiveNav] = useState("dashboard");
+
+  // Scroll spy to automatically update active navigation based on scroll position / visible section
+  useEffect(() => {
+    const handleScroll = () => {
+      const navSections = [
+        { id: "dashboard", key: "dashboard" },
+        { id: "analysis", key: "analysis" },
+        { id: "results", key: "analysis" },
+        { id: "safety", key: "safety" },
+      ];
+
+      const scrollY = window.scrollY;
+      const windowHeight = window.innerHeight;
+      const documentHeight = document.documentElement.scrollHeight;
+
+      // When scrolled near the bottom, activate safety & limits
+      if (scrollY + windowHeight >= documentHeight - 60) {
+        setActiveNav("safety");
+        return;
+      }
+
+      const triggerY = 140;
+      let current = "dashboard";
+
+      for (const section of navSections) {
+        const el = document.getElementById(section.id);
+        if (el) {
+          const rect = el.getBoundingClientRect();
+          if (rect.top <= triggerY) {
+            current = section.key;
+          }
+        }
+      }
+
+      setActiveNav(current);
+    };
+
+    let ticking = false;
+    const onScroll = () => {
+      if (!ticking) {
+        window.requestAnimationFrame(() => {
+          handleScroll();
+          ticking = false;
+        });
+        ticking = true;
+      }
+    };
+
+    window.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener("hashchange", handleScroll);
+    handleScroll();
+
+    return () => {
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("hashchange", handleScroll);
+    };
+  }, []);
+
   useEffect(() => {
     const saved = localStorage.getItem("urban-flow-theme");
     if (saved) setTheme(saved);
@@ -707,8 +842,18 @@ export default function App() {
     const interval = window.setInterval(checkHealth, 5000);
     return () => { active = false; window.clearInterval(interval); };
   }, []);
-  const showReport = (nextReport) => { setReport(nextReport); if (nextReport?.cycle?.total_green_seconds) setGreenBudget(nextReport.cycle.total_green_seconds); setTimeout(() => { const el = document.getElementById("results"); if (el) { el.scrollIntoView({ behavior: "smooth", block: "start" }); } }, 120); };
-  return <div id="top" className="app-shell" data-theme={theme}><Header health={health} theme={theme} onToggleTheme={() => setTheme((current) => current === "dark" ? "light" : "dark")} />
+  const showReport = (nextReport) => {
+    setReport(nextReport);
+    setActiveNav("analysis");
+    if (nextReport?.cycle?.total_green_seconds) setGreenBudget(nextReport.cycle.total_green_seconds);
+    setTimeout(() => {
+      const el = document.getElementById("results");
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    }, 120);
+  };
+  return <div id="top" className="app-shell" data-theme={theme}><Header health={health} theme={theme} onToggleTheme={() => setTheme((current) => current === "dark" ? "light" : "dark")} activeNav={activeNav} onNavClick={setActiveNav} />
     {health?.apiAvailable === false && <div className="setup-notice" role="status"><Info size={17} /><div><strong>Backend is not running</strong><p>Open PowerShell in the project folder and run <code>.\start-local.ps1</code>. This starts the API and website.</p></div><button type="button" onClick={() => window.location.reload()} aria-label="Retry backend connection"><RotateCcw size={15} />Retry</button></div>}
     {health?.authRequired && <div className="setup-notice setup-notice-warning" role="alert"><Info size={17} /><div><strong>Authentication required</strong><p>Check local dev token configuration. Run <code>start.bat</code> to launch with the authenticated local dev proxy, or verify backend authentication.</p></div></div>}
     {health?.apiAvailable && (!health.computerVisionReady || !health.modelAvailable) && <div className="setup-notice setup-notice-warning" role="status"><Info size={17} /><div><strong>{!health.computerVisionReady ? "Image/video analysis needs setup" : "Local YOLO model is missing"}</strong><p>{!health.computerVisionReady ? `Missing packages: ${health.missingDependencies.join(", ") || "OpenCV and Ultralytics"}. Run .\\backend\\setup.ps1, then restart the backend.` : "Download yolov8n.pt into backend\\, then restart the backend. Simulated counts are ready now."}</p></div></div>}
