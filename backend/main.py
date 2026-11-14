@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import logging
 import os
@@ -69,6 +70,7 @@ from services.detection import (
     analyse_image,
     analyse_video,
     get_detection_status,
+    warmup_model,
 )
 from services.gemini import (
     GeminiAnalysisError,
@@ -95,6 +97,12 @@ LOGGER = logging.getLogger("urban_flow.backend")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 REPORT_DIR.mkdir(parents=True, exist_ok=True)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    warmup_model(async_mode=True)
+    yield
+
+
 app = FastAPI(
     title="Adaptive Traffic Signal System",
     description="Deterministic traffic signal timing recommendations with local YOLO and optional Gemini analysis.",
@@ -102,6 +110,7 @@ app = FastAPI(
     docs_url="/docs" if os.getenv("URBAN_FLOW_ENV") == "development" else None,
     redoc_url="/redoc" if os.getenv("URBAN_FLOW_ENV") == "development" else None,
     openapi_url="/openapi.json" if os.getenv("URBAN_FLOW_ENV") == "development" else None,
+    lifespan=lifespan,
 )
 
 
@@ -443,6 +452,7 @@ def health(
     Unauthenticated probes receive minimal status without disclosing internals.
     Authenticated requests receive complete diagnostics and safe storage metrics.
     """
+    warmup_model(async_mode=True)
     token = x_api_token
     if not token and authorization:
         parts = authorization.strip().split()
