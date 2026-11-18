@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -499,10 +500,14 @@ def analyse_directional_video_clip(
 
     model = _get_model()
     set_inference_priority()
+
+    # Hardware-adaptive CPU thread tuning for low-spec edge PCs (Core i3/i5 8th gen) vs high-core workstations
+    import os
+    import torch
+    cpu_cores = os.cpu_count() or 4
+    optimal_threads = max(1, min(4, cpu_cores // 2)) if cpu_cores <= 4 else max(2, min(8, cpu_cores // 4))
     try:
-        import os
-        import torch
-        torch.set_num_threads(min(12, os.cpu_count() or 4))
+        torch.set_num_threads(optimal_threads)
     except Exception:
         pass
 
@@ -512,9 +517,9 @@ def analyse_directional_video_clip(
         raise ValueError(f"Could not open video: {video_path.name}")
 
     frame_interval = max(1, int(round(native_fps / sample_fps)))
-    target_indices = list(range(0, frame_count, frame_interval))
+    target_indices = set(range(0, frame_count, frame_interval))
     if not target_indices:
-        target_indices = [0]
+        target_indices = {0}
 
     sampled_frames = []
     sampled_timestamps = []
@@ -523,44 +528,50 @@ def analyse_directional_video_clip(
     rep_frame_idx = 0
 
     try:
-        for f_idx in target_indices:
+        f_idx = 0
+        while f_idx < frame_count:
             if cancellation_check and cancellation_check():
                 raise RuntimeError(f"Video processing cancelled during {norm_dir} analysis.")
 
-            cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                continue
+            if f_idx in target_indices:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    break
+                sampled_frames.append(frame)
+                sampled_timestamps.append(f_idx / native_fps)
 
-            sampled_frames.append(frame)
-            sampled_timestamps.append(f_idx / native_fps)
-
-            diff = abs(f_idx - mid_target_idx)
-            if diff < best_mid_diff:
-                best_mid_diff = diff
-                rep_frame_idx = len(sampled_frames) - 1
+                diff = abs(f_idx - mid_target_idx)
+                if diff < best_mid_diff:
+                    best_mid_diff = diff
+                    rep_frame_idx = len(sampled_frames) - 1
+            else:
+                # Fast forward frame grab without uncompressed decode overhead
+                if not cap.grab():
+                    break
+            f_idx += 1
     finally:
         cap.release()
 
     if not sampled_frames:
         raise ValueError("Could not extract any valid sampled frames from the video.")
 
-    # Vectorized batch YOLO inference (640px native dimension for maximum SIMD throughput)
-    batch_size = 16
+    # Vectorized batch YOLO inference with PyTorch inference mode (zero autograd tracking memory)
+    batch_size = 8 if cpu_cores <= 4 else 16
     all_res = []
-    for b_start in range(0, len(sampled_frames), batch_size):
-        if cancellation_check and cancellation_check():
-            raise RuntimeError(f"Video processing cancelled during {norm_dir} analysis.")
-        b_frames = sampled_frames[b_start : b_start + batch_size]
-        res_chunk = model.predict(
-            b_frames,
-            verbose=False,
-            classes=DETECTION_CLASS_IDS,
-            conf=0.18,
-            imgsz=640,
-            batch=len(b_frames),
-        )
-        all_res.extend(res_chunk)
+    with torch.inference_mode():
+        for b_start in range(0, len(sampled_frames), batch_size):
+            if cancellation_check and cancellation_check():
+                raise RuntimeError(f"Video processing cancelled during {norm_dir} analysis.")
+            b_frames = sampled_frames[b_start : b_start + batch_size]
+            res_chunk = model.predict(
+                b_frames,
+                verbose=False,
+                classes=DETECTION_CLASS_IDS,
+                conf=0.18,
+                imgsz=640,
+                batch=len(b_frames),
+            )
+            all_res.extend(res_chunk)
 
     representative_frame = sampled_frames[rep_frame_idx].copy()
     all_detections_for_viz = []
@@ -735,7 +746,10 @@ def analyse_multi_directional_videos(
             }
 
     if provided_approaches:
-        workers = min(4, len(provided_approaches))
+        cpu_cores = os.cpu_count() or 4
+        # Hardware-adaptive concurrency: on dual-core / quad-core edge devices (Core i3/i5 <= 4 cores),
+        # throttle to 2 parallel workers to avoid thread thrashing and memory exhaustion.
+        workers = min(2, len(provided_approaches)) if cpu_cores <= 4 else min(4, len(provided_approaches))
         with ThreadPoolExecutor(max_workers=workers) as executor:
             future_to_dir = {
                 executor.submit(
