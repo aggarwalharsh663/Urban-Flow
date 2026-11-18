@@ -54,6 +54,21 @@ namespace UrbanFlowLauncher
             }
         }
 
+        private static void UnblockDirectory(string dirPath, string searchPattern)
+        {
+            try
+            {
+                if (Directory.Exists(dirPath))
+                {
+                    foreach (string file in Directory.GetFiles(dirPath, searchPattern, SearchOption.AllDirectories))
+                    {
+                        UnblockFile(file);
+                    }
+                }
+            }
+            catch { }
+        }
+
         private static void ActivateExistingInstance()
         {
             try
@@ -169,6 +184,15 @@ namespace UrbanFlowLauncher
 
                     // Unblock Electron executable before launch
                     UnblockFile(electronExe);
+
+                    // Unblock native binaries and node addons in workingDir (prevents Windows SmartScreen warnings)
+                    try
+                    {
+                        string nodeModules = Path.Combine(workingDir, "node_modules");
+                        UnblockDirectory(nodeModules, "*.node");
+                        UnblockDirectory(nodeModules, "*.exe");
+                    }
+                    catch { }
 
                     // Build arguments forwarding
                     string forwardArgs = ".";
