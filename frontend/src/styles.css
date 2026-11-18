@@ -380,3 +380,94 @@ h1,h2,h3,p{margin-top:0}
   background: var(--ink);
   color: var(--paper);
 }
+
+/* 4-Camera CCTV Multi-View with Auto-Zoom on Hover */
+.cctv-quad-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+@media (max-width: 768px) {
+  .cctv-quad-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.cctv-cam-card {
+  border: 2px solid var(--rule);
+  background: var(--paper);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  transition: transform 0.28s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.28s ease;
+  z-index: 1;
+  border-radius: 4px;
+}
+.cctv-cam-card:hover {
+  transform: scale(1.18);
+  z-index: 30;
+  box-shadow: 0 16px 32px rgba(0, 0, 0, 0.6), 0 0 0 2px var(--direction, var(--signal));
+}
+.cctv-cam-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  background: var(--card);
+  border-bottom: 2px solid var(--rule);
+  font: 700 11px var(--font-mono);
+  text-transform: uppercase;
+}
+.cctv-cam-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--direction, var(--ink));
+}
+.cctv-cam-badge {
+  font: 700 10px var(--font-mono);
+  padding: 2px 6px;
+  background: var(--direction, var(--ink));
+  color: var(--paper);
+}
+.cctv-media-wrap {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: #000;
+  position: relative;
+}
+.cctv-cam-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  transition: transform 0.3s ease;
+}
+.cctv-cam-card:hover .cctv-cam-img {
+  transform: scale(1.08);
+}
+.cctv-cam-empty {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--card);
+  color: var(--ink-soft);
+  font: 500 11px var(--font-mono);
+  text-align: center;
+  padding: 10px;
+}
+.cctv-cam-footer {
+  padding: 6px 10px;
+  display: flex;
+  justify-content: space-between;
+  font: 500 11px var(--font-mono);
+  color: var(--ink-soft);
+  background: var(--card);
+  border-top: 1px solid var(--rule);
+}
+.cctv-cam-footer b {
+  color: var(--ink);
+}

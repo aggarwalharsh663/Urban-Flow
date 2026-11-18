@@ -977,46 +977,69 @@ function Results({ report, onUpdateReport }) {
             <div className="result-card-heading">
               <div>
                 <h3>Detection preview</h3>
-                <p>Original input and locally annotated frame</p>
+                <p>{report.source === "multi_video" ? "All 4 Directional Approaches (Auto-zooms on hover)" : "Original input and locally annotated frame"}</p>
               </div>
             </div>
 
-            {report.annotated_files && Object.keys(report.annotated_files).length > 1 && (
-              <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
-                {Object.keys(report.annotated_files).map((dir) => (
-                  <button
-                    key={dir}
-                    type="button"
-                    onClick={() => setSelectedPreviewDir(dir)}
-                    className="fps-chip"
-                    style={{
-                      borderColor: selectedPreviewDir === dir ? COLORS[dir] : "var(--rule)",
-                      background: selectedPreviewDir === dir ? COLORS[dir] : "transparent",
-                      color: selectedPreviewDir === dir ? "var(--paper)" : "var(--ink)",
-                    }}
-                  >
-                    {dir} Camera
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {report.original_url && report.source !== "multi_video" && (
-              <div className="media-preview-block">
-                <span className="media-label">ORIGINAL UPLOAD</span>
-                {report.source === "video" ? <video src={imageUrl(report.original_url)} controls /> : <img src={imageUrl(report.original_url)} alt="Original junction upload" />}
-              </div>
-            )}
-
-            {activeAnnotatedUrl ? (
-              <div className="media-preview-block">
-                <span className="media-label">
-                  {report.source === "multi_video" ? `${selectedPreviewDir.toUpperCase()} APPROACH TRACKING` : "YOLOV8 DETECTIONS"}
-                </span>
-                <img src={activeAnnotatedUrl} alt="Locally annotated vehicle detections" />
+            {report.source === "multi_video" || (report.annotated_files && Object.keys(report.annotated_files).length > 0) ? (
+              <div className="cctv-quad-grid">
+                {DIRECTIONS.map((dir) => {
+                  const fileName = report.annotated_files?.[dir];
+                  const m = report.directional_metrics?.[dir];
+                  const g = report.green_times?.[dir] ?? 30;
+                  return (
+                    <div key={dir} className="cctv-cam-card" style={{ "--direction": COLORS[dir] }}>
+                      <div className="cctv-cam-header">
+                        <span className="cctv-cam-title">
+                          <DirectionIcon direction={dir} size={13} />
+                          {dir} Approach
+                        </span>
+                        <span className="cctv-cam-badge">
+                          {report.counts[dir]} Demands · {g}s Green
+                        </span>
+                      </div>
+                      <div className="cctv-media-wrap">
+                        {fileName ? (
+                          <img
+                            className="cctv-cam-img"
+                            src={imageUrl(`/uploads/${fileName}`)}
+                            alt={`${dir} approach tracking preview`}
+                          />
+                        ) : (
+                          <div className="cctv-cam-empty">
+                            <span>No video supplied for {dir}<br />(Baseline floor applied)</span>
+                          </div>
+                        )}
+                      </div>
+                      {m && (
+                        <div className="cctv-cam-footer">
+                          <span>Unique: <b>{m.unique_vehicles}</b></span>
+                          <span>Queue: <b>{m.peak_queue}</b></span>
+                          <span>Flow: <b>{m.flow_rate_per_min}/m</b></span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             ) : (
-              <div className="no-media"><FileImage size={22} /><span>Simulation contains no source image.</span></div>
+              <>
+                {report.original_url && (
+                  <div className="media-preview-block">
+                    <span className="media-label">ORIGINAL UPLOAD</span>
+                    {report.source === "video" ? <video src={imageUrl(report.original_url)} controls /> : <img src={imageUrl(report.original_url)} alt="Original junction upload" />}
+                  </div>
+                )}
+
+                {activeAnnotatedUrl ? (
+                  <div className="media-preview-block">
+                    <span className="media-label">YOLOV8 DETECTIONS</span>
+                    <img src={imageUrl(activeAnnotatedUrl)} alt="Locally annotated vehicle detections" />
+                  </div>
+                ) : (
+                  <div className="no-media"><FileImage size={22} /><span>Simulation contains no source image.</span></div>
+                )}
+              </>
             )}
 
             {report.analysis_note && (

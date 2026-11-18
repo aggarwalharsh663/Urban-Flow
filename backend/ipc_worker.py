@@ -332,12 +332,11 @@ def handle_analyse_multi_video(data: dict, req_id: Optional[str] = None) -> dict
         if req_id and is_request_cancelled(req_id):
             raise RuntimeError(f"Request {req_id} was cancelled.")
 
-        first_dest_name = dest_paths[list(dest_paths.keys())[0]].name if dest_paths else None
         report = create_signal_plan(
             result["counts"],
             junction_name=junction_name,
             source="multi_video",
-            original_url=f"/uploads/{first_dest_name}" if first_dest_name else None,
+            original_url=None,
             annotated_url=f"/uploads/{result['annotated_filename']}",
             detection_count=result["total_count"],
             detections=result["detections"],
@@ -349,6 +348,7 @@ def handle_analyse_multi_video(data: dict, req_id: Optional[str] = None) -> dict
         )
         report["directional_metrics"] = result.get("directional_metrics", {})
         report["annotated_files"] = result.get("annotated_files", {})
+        report["original_files"] = {d: f"/uploads/{p.name}" for d, p in dest_paths.items() if p}
         cleanup_storage(UPLOAD_DIR, REPORT_DIR)
         return _save_report(report)
     except Exception:

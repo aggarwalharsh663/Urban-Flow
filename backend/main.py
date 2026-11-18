@@ -760,12 +760,11 @@ async def analyse_multi_video_endpoint(
             sample_fps=max(0.5, min(10.0, sample_fps)),
         )
 
-        first_dest_name = saved_paths[list(saved_paths.keys())[0]].name if saved_paths else None
         report = create_signal_plan(
             result["counts"],
             junction_name=sanitized_name,
             source="multi_video",
-            original_url=f"/uploads/{first_dest_name}" if first_dest_name else None,
+            original_url=None,
             annotated_url=f"/uploads/{result['annotated_filename']}",
             detection_count=result["total_count"],
             detections=result["detections"],
@@ -777,6 +776,7 @@ async def analyse_multi_video_endpoint(
         )
         report["directional_metrics"] = result.get("directional_metrics", {})
         report["annotated_files"] = result.get("annotated_files", {})
+        report["original_files"] = {d: f"/uploads/{p.name}" for d, p in saved_paths.items() if p}
         cleanup_storage(UPLOAD_DIR, REPORT_DIR)
         return save_report_atomic(report, REPORT_DIR, source_channel="api")
     except HTTPException:
