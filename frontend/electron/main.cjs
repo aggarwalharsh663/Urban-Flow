@@ -208,6 +208,9 @@ function verifyMagicBytes(buffer, ext) {
   if (ext === '.mp4') {
     return buffer.length >= 8 && buffer.slice(4, 8).toString('latin1') === 'ftyp';
   }
+  if (ext === '.avi') {
+    return buffer.length >= 12 && buffer.slice(0, 4).toString('latin1') === 'RIFF' && buffer.slice(8, 12).toString('latin1') === 'AVI ';
+  }
   return false;
 }
 
@@ -233,6 +236,7 @@ const ACTION_SCOPES = {
   'update-counts': 'reports:write',
   'analyse-image': 'inference:write',
   'analyse-video': 'inference:write',
+  'analyse-multi-video': 'inference:write',
   'cancel': 'admin',
 };
 
@@ -362,6 +366,7 @@ const ALLOWED_IPC_ACTIONS = new Set([
   'signal-plan',
   'analyse-image',
   'analyse-video',
+  'analyse-multi-video',
   'get-report',
   'update-cycle',
   'update-counts',
@@ -571,6 +576,118 @@ function registerProtocolHandler() {
           // Clean up temp file on failure
           try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch (e) {}
           throw ipcErr;
+        }
+      }
+
+      // 7b. API: /api/analyse-multi-video (directional 4-video upload)
+      if (rawPathname === '/api/analyse-multi-video') {
+        const MAX_VIDEO_UPLOAD_SIZE = 150 * 1024 * 1024; // 150 MB per video upload
+        const formData = await req.formData();
+        const directions = ['north', 'south', 'east', 'west'];
+        const savedPaths = {};
+        const createdFiles = [];
+
+        try {
+          for (const dir of directions) {
+            const file = formData.get(`${dir}_file`) || formData.get(dir);
+            if (!file || typeof file === 'string' || !file.name) continue;
+
+            if (file.size > MAX_VIDEO_UPLOAD_SIZE) {
+              return new Response(JSON.stringify({ detail: `Video for ${dir} exceeds 150 MB limit.` }), {
+                status: 413,
+                headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+              });
+            }
+
+            const ext = path.extname(file.name || '').toLowerCase();
+            const allowedExts = new Set(['.mp4', '.avi']);
+            if (!allowedExts.has(ext)) {
+              return new Response(JSON.stringify({ detail: `Unsupported video format '${ext}' for ${dir}. Allowed: .mp4, .avi` }), {
+                status: 400,
+                headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+              });
+            }
+
+            const tempName = `${crypto.randomUUID()}${ext}`;
+            const tempPath = path.join(UPLOAD_DIR, tempName);
+            const writeStream = fs.createWriteStream(tempPath);
+            const reader = file.stream().getReader();
+
+            let totalBytes = 0;
+            let headerChunk = null;
+            let streamFailed = false;
+
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                const buf = Buffer.from(value);
+                if (!headerChunk) {
+                  headerChunk = buf;
+                  if (!verifyMagicBytes(headerChunk, ext)) {
+                    streamFailed = true;
+                    break;
+                  }
+                }
+                totalBytes += buf.length;
+                if (totalBytes > MAX_VIDEO_UPLOAD_SIZE) {
+                  streamFailed = true;
+                  break;
+                }
+                writeStream.write(buf);
+              }
+              await new Promise((res, rej) => {
+                writeStream.end((err) => err ? rej(err) : res());
+              });
+            } catch (err) {
+              streamFailed = true;
+            }
+
+            if (streamFailed || !headerChunk || !verifyMagicBytes(headerChunk, ext)) {
+              try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch (e) {}
+              if (totalBytes > MAX_VIDEO_UPLOAD_SIZE) {
+                return new Response(JSON.stringify({ detail: `Video for ${dir} exceeds 150 MB limit.` }), {
+                  status: 413,
+                  headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+                });
+              }
+              return new Response(JSON.stringify({ detail: `File content for ${dir} does not match expected format for ${ext}.` }), {
+                status: 400,
+                headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+              });
+            }
+
+            savedPaths[dir] = tempPath;
+            createdFiles.push(tempPath);
+          }
+
+          if (Object.keys(savedPaths).length === 0) {
+            return new Response(JSON.stringify({ detail: 'At least one directional video must be uploaded.' }), {
+              status: 400,
+              headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+            });
+          }
+
+          const result = await sendIpcRequest('analyse-multi-video', {
+            videos: savedPaths,
+            junction_name: (formData.get('junction_name') || '').trim() || null,
+            green_budget: Math.max(40, Math.min(600, Number(formData.get('green_budget')) || 120)),
+            yellow_seconds: Math.max(1, Math.min(10, Number(formData.get('yellow_seconds')) || 3)),
+            all_red_seconds: Math.max(0, Math.min(10, Number(formData.get('all_red_seconds')) || 0)),
+            sample_fps: Math.max(0.5, Math.min(10, Number(formData.get('sample_fps')) || 2)),
+          }, 180000, 'inference:write');
+
+          return new Response(JSON.stringify(result), {
+            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+          });
+        } catch (ipcErr) {
+          for (const f of createdFiles) {
+            try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
+          }
+          return new Response(JSON.stringify({ detail: ipcErr.message || 'Multi-video analysis failed.' }), {
+            status: 400,
+            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+          });
         }
       }
 

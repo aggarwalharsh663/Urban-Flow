@@ -30,6 +30,7 @@ from security_config import (
     MAX_JUNCTION_NAME_LENGTH,
     MAX_STORAGE_BYTES,
     MAX_UPLOAD_SIZE_BYTES,
+    MAX_VIDEO_UPLOAD_SIZE_BYTES,
     MAX_VEHICLE_COUNT,
     cleanup_storage,
     read_report_atomic,
@@ -49,6 +50,9 @@ from services.detection import (
     analyse_video,
     get_detection_status,
     warmup_model,
+)
+from services.video_tracker import (
+    analyse_multi_directional_videos,
 )
 from services.gemini import (
     GeminiAnalysisError,
@@ -256,6 +260,113 @@ def handle_analyse(data: dict, video: bool = False, req_id: Optional[str] = None
         GLOBAL_STORAGE_MANAGER.release(res_id)
 
 
+def handle_analyse_multi_video(data: dict, req_id: Optional[str] = None) -> dict:
+    videos = data.get("videos") or {}
+    if not isinstance(videos, dict) or not any(videos.values()):
+        raise ValueError("At least one directional video must be provided for multi-video analysis.")
+
+    total_size = 0
+    src_paths: dict[str, Path] = {}
+    dest_paths: dict[str, Path] = {}
+
+    for dir_name, fpath_str in videos.items():
+        if not fpath_str:
+            continue
+        norm_dir = dir_name.capitalize()
+        if norm_dir not in DIRECTIONS:
+            raise ValueError(f"Invalid direction: {dir_name}. Must be North, South, East, or West.")
+        src = Path(fpath_str).resolve()
+        if not src.is_file():
+            raise FileNotFoundError(f"Source video file not found for {norm_dir}: {fpath_str}")
+        size = src.stat().st_size
+        if size > MAX_VIDEO_UPLOAD_SIZE_BYTES:
+            raise ValueError(f"Video for {norm_dir} exceeds maximum allowed size of 150 MB.")
+        if size == 0:
+            raise ValueError(f"Video for {norm_dir} is empty.")
+        suffix = src.suffix.lower()
+        if suffix not in ALLOWED_VIDEO_EXTENSIONS:
+            raise ValueError(
+                f"Unsupported file type '{suffix}' for {norm_dir}. Allowed: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}"
+            )
+
+        with src.open("rb") as f:
+            header = f.read(32)
+        if not verify_magic_bytes(header, suffix):
+            raise ValueError(f"Magic bytes verification failed for {norm_dir} video ({suffix}).")
+
+        src_paths[norm_dir] = src
+        total_size += size
+
+    reserved, res_id = GLOBAL_STORAGE_MANAGER.reserve(total_size)
+    if not reserved:
+        raise ValueError("Storage quota exceeded (500 MB limit). Automatic cleanup could not free sufficient space.")
+
+    try:
+        for norm_dir, src in src_paths.items():
+            GLOBAL_STORAGE_MANAGER.mark_active(src)
+            suffix = src.suffix.lower()
+            filename = f"{uuid.uuid4().hex}{suffix}"
+            dest = UPLOAD_DIR / filename
+            GLOBAL_STORAGE_MANAGER.mark_active(dest)
+            if src != dest:
+                shutil.move(str(src), str(dest))
+            dest_paths[norm_dir] = dest
+
+        if req_id and is_request_cancelled(req_id):
+            raise RuntimeError(f"Request {req_id} was cancelled before inference.")
+
+        green_budget = max(40, min(600, int(data.get("green_budget", DEFAULT_GREEN_BUDGET))))
+        yellow_seconds = max(1, min(10, int(data.get("yellow_seconds", DEFAULT_YELLOW_SECONDS))))
+        all_red_seconds = max(0, min(10, int(data.get("all_red_seconds", DEFAULT_ALL_RED_SECONDS))))
+        raw_name = data.get("junction_name") or "Multi-Camera Junction"
+        junction_name = sanitize_junction_name(raw_name)
+        sample_fps = float(data.get("sample_fps", 2.0))
+
+        result = analyse_multi_directional_videos(
+            dest_paths,
+            UPLOAD_DIR,
+            cancellation_check=lambda: is_request_cancelled(req_id),
+            sample_fps=sample_fps,
+        )
+
+        if req_id and is_request_cancelled(req_id):
+            raise RuntimeError(f"Request {req_id} was cancelled.")
+
+        first_dest_name = dest_paths[list(dest_paths.keys())[0]].name if dest_paths else None
+        report = create_signal_plan(
+            result["counts"],
+            junction_name=junction_name,
+            source="multi_video",
+            original_url=f"/uploads/{first_dest_name}" if first_dest_name else None,
+            annotated_url=f"/uploads/{result['annotated_filename']}",
+            detection_count=result["total_count"],
+            detections=result["detections"],
+            analysis_note=result.get("analysis_note"),
+            analysis_provider=result.get("analysis_provider"),
+            green_budget=green_budget,
+            yellow_seconds=yellow_seconds,
+            all_red_seconds=all_red_seconds,
+        )
+        report["directional_metrics"] = result.get("directional_metrics", {})
+        report["annotated_files"] = result.get("annotated_files", {})
+        cleanup_storage(UPLOAD_DIR, REPORT_DIR)
+        return _save_report(report)
+    except Exception:
+        for dest in dest_paths.values():
+            if dest and dest.is_file():
+                dest.unlink(missing_ok=True)
+        for src in src_paths.values():
+            if src and src.is_file() and src not in dest_paths.values():
+                src.unlink(missing_ok=True)
+        raise
+    finally:
+        for src in src_paths.values():
+            GLOBAL_STORAGE_MANAGER.unmark_active(src)
+        for dest in dest_paths.values():
+            GLOBAL_STORAGE_MANAGER.unmark_active(dest)
+        GLOBAL_STORAGE_MANAGER.release(res_id)
+
+
 def handle_get_report(data: dict) -> dict:
     report_id = str(data.get("report_id", ""))
     if not report_id.isalnum():
@@ -391,6 +502,7 @@ ACTION_REQUIRED_SCOPES = {
     "update-counts": "reports:write",
     "analyse-image": "inference:write",
     "analyse-video": "inference:write",
+    "analyse-multi-video": "inference:write",
     "cancel": "admin",
 }
 
@@ -471,6 +583,7 @@ HANDLERS = {
     "signal-plan": handle_calculate_signal_plan,
     "analyse-image": lambda d, req_id=None: handle_analyse(d, video=False, req_id=req_id),
     "analyse-video": lambda d, req_id=None: handle_analyse(d, video=True, req_id=req_id),
+    "analyse-multi-video": lambda d, req_id=None: handle_analyse_multi_video(d, req_id=req_id),
     "get-report": handle_get_report,
     "update-cycle": handle_update_cycle,
     "update-counts": handle_update_counts,
@@ -500,7 +613,7 @@ def process_ipc_request(req: dict) -> dict:
         return {"id": req_id, "ok": False, "error": f"Unknown action: {action}"}
 
     try:
-        if action in {"analyse-image", "analyse-video"}:
+        if action in {"analyse-image", "analyse-video", "analyse-multi-video"}:
             result = handler(data, req_id=req_id)
         else:
             result = handler(data)

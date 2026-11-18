@@ -3,7 +3,7 @@ import {
   AlertTriangle, ArrowDown, ArrowDownLeft, ArrowUp, ArrowUpRight, BarChart3,
   CarFront, ChevronRight, CircleHelp, Clock3, Download, FileImage,
   FileVideo2, Gauge, Info, LoaderCircle, MapPin, Moon, RotateCcw, ShieldCheck, Sun, SlidersHorizontal,
-  Sparkles, UploadCloud, Video, X,
+  Sparkles, UploadCloud, Video, Film, X,
 } from "lucide-react";
 
 const API = "";
@@ -389,6 +389,207 @@ function Simulation({ onReport, junctionName, greenBudget = 120, onBudgetChange 
   );
 }
 
+function MultiVideoAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetChange }) {
+  const [files, setFiles] = useState({ North: null, South: null, East: null, West: null });
+  const [sampleFps, setSampleFps] = useState(2.0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const inputRefs = {
+    North: useRef(null),
+    South: useRef(null),
+    East: useRef(null),
+    West: useRef(null),
+  };
+
+  const handleSelectFile = (direction, selected) => {
+    if (!selected) return;
+    const extension = selected.name.toLowerCase().split(".").pop();
+    const isVideo = ["mp4", "avi"].includes(extension) || selected.type.startsWith("video/");
+    if (!isVideo) {
+      setError(`Video for ${direction} must be an MP4 or AVI file.`);
+      return;
+    }
+    if (selected.size > 150 * 1024 * 1024) {
+      setError(`Video for ${direction} is larger than the 150 MB limit.`);
+      return;
+    }
+    setError("");
+    setFiles((prev) => ({ ...prev, [direction]: selected }));
+  };
+
+  const removeFile = (direction) => {
+    setFiles((prev) => ({ ...prev, [direction]: null }));
+    if (inputRefs[direction]?.current) {
+      inputRefs[direction].current.value = "";
+    }
+  };
+
+  const providedCount = Object.values(files).filter(Boolean).length;
+
+  const analyse = async () => {
+    if (providedCount === 0) {
+      setError("Please select at least one approach video clip.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+
+    const form = new FormData();
+    if (files.North) form.append("north_file", files.North);
+    if (files.South) form.append("south_file", files.South);
+    if (files.East) form.append("east_file", files.East);
+    if (files.West) form.append("west_file", files.West);
+
+    if (junctionName?.trim()) {
+      form.append("junction_name", junctionName.trim().slice(0, 100));
+    }
+    form.append("green_budget", greenBudget);
+    form.append("sample_fps", sampleFps);
+
+    try {
+      const report = await request("/api/analyse-multi-video", {
+        method: "POST",
+        body: form,
+      });
+      onReport(report);
+    } catch (err) {
+      setError(err.message || "Failed to process directional videos.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="upload-panel">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+        <div>
+          <strong style={{ font: "700 15px var(--font-mono)", color: "var(--ink)" }}>
+            4-Direction Approach Video Selection
+          </strong>
+          <p style={{ margin: "4px 0 0", fontSize: "12px", color: "var(--ink-soft)" }}>
+            Upload dedicated CCTV or camera clips for North, South, East, and West approaches (MP4/AVI up to 120s, max 150 MB each).
+          </p>
+        </div>
+        <div className="fps-toggle-group">
+          <span>Sampling Rate:</span>
+          <button
+            type="button"
+            className={`fps-chip ${sampleFps === 2.0 ? "active" : ""}`}
+            onClick={() => setSampleFps(2.0)}
+          >
+            2 FPS (High Precision)
+          </button>
+          <button
+            type="button"
+            className={`fps-chip ${sampleFps === 1.0 ? "active" : ""}`}
+            onClick={() => setSampleFps(1.0)}
+          >
+            1 FPS (Fast CPU)
+          </button>
+        </div>
+      </div>
+
+      <div className="multi-video-grid">
+        {DIRECTIONS.map((dir) => {
+          const file = files[dir];
+          const Icon = ICONS[dir];
+          return (
+            <div
+              key={dir}
+              className={`multi-video-slot ${file ? "has-file" : ""}`}
+              style={{ "--direction": COLORS[dir] }}
+            >
+              <div className="multi-video-slot-header">
+                <span className="multi-video-badge">
+                  <Icon size={14} />
+                  {dir} Approach
+                </span>
+                {file && (
+                  <button
+                    className="icon-button"
+                    type="button"
+                    onClick={() => removeFile(dir)}
+                    aria-label={`Remove ${dir} video`}
+                  >
+                    <X size={14} />
+                  </button>
+                )}
+              </div>
+
+              <input
+                ref={inputRefs[dir]}
+                type="file"
+                accept=".mp4,.avi,video/mp4,video/x-msvideo"
+                hidden
+                onChange={(e) => handleSelectFile(dir, e.target.files[0])}
+              />
+
+              {file ? (
+                <div className="multi-video-selected">
+                  <span className="multi-video-file-info">{file.name}</span>
+                  <span className="multi-video-file-size">
+                    {(file.size / (1024 * 1024)).toFixed(1)} MB · Ready
+                  </span>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="multi-video-empty-btn"
+                  onClick={() => inputRefs[dir]?.current?.click()}
+                >
+                  <FileVideo2 size={24} />
+                  <strong>Choose {dir} Clip</strong>
+                  <small>Drop or click to select</small>
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ margin: "14px 0", fontSize: "12px", color: "var(--ink-soft)", display: "flex", alignItems: "center", gap: 6 }}>
+        <Info size={14} />
+        <span>
+          <strong>Graceful Fallback:</strong> Approaches without a video clip will automatically receive a baseline minimum green allocation (10s floor).
+        </span>
+      </div>
+
+      {error && <div className="inline-error"><AlertTriangle size={15} />{error}</div>}
+
+      <CycleTimingControl
+        budget={greenBudget}
+        onChange={onBudgetChange}
+        title="Signal Cycle Green Budget"
+        description="Total green seconds distributed according to measured approach demand"
+      />
+
+      <div className="upload-actions">
+        <span className="local-process">
+          <ShieldCheck size={14} />
+          Local YOLOv8 + IoU Temporal Tracker (100% On-Device)
+        </span>
+        <button
+          onClick={analyse}
+          className="button button-primary analyse-button"
+          disabled={providedCount === 0 || busy}
+        >
+          {busy ? (
+            <>
+              <LoaderCircle className="spin" size={16} />
+              Tracking traffic across {providedCount} approaches…
+            </>
+          ) : (
+            <>
+              <Sparkles size={16} />
+              Analyse {providedCount > 0 ? `${providedCount} Approach${providedCount > 1 ? "es" : ""}` : "Videos"}
+            </>
+          )}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function AnalysisSection({ onReport, junctionName, greenBudget = 120, onBudgetChange, health }) {
   const [mode, setMode] = useState("upload");
   return (
@@ -402,10 +603,16 @@ function AnalysisSection({ onReport, junctionName, greenBudget = 120, onBudgetCh
         <span className="local-badge"><span className="status-dot" />{health?.geminiAvailable ? "LOCAL + OPTIONAL CLOUD" : "PROCESSING STAYS LOCAL"}</span>
       </div>
       <div className="analysis-card">
-        <div className="mode-tabs" role="tablist" aria-label="Analysis mode"><button className={mode === "upload" ? "selected" : ""} onClick={() => setMode("upload")}><Video size={15} />Image / video</button><button className={mode === "simulate" ? "selected" : ""} onClick={() => setMode("simulate")}><Gauge size={15} />Simulated data</button></div>
-        {mode === "upload" ? <UploadAnalysis onReport={onReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={onBudgetChange} health={health} /> : <Simulation onReport={onReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={onBudgetChange} />}
+        <div className="mode-tabs" role="tablist" aria-label="Analysis mode">
+          <button className={mode === "upload" ? "selected" : ""} onClick={() => setMode("upload")}><Video size={15} />Single image / video</button>
+          <button className={mode === "multi_video" ? "selected" : ""} onClick={() => setMode("multi_video")}><Film size={15} />4-Direction Video (N/S/E/W)</button>
+          <button className={mode === "simulate" ? "selected" : ""} onClick={() => setMode("simulate")}><Gauge size={15} />Simulated data</button>
+        </div>
+        {mode === "upload" && <UploadAnalysis onReport={onReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={onBudgetChange} health={health} />}
+        {mode === "multi_video" && <MultiVideoAnalysis onReport={onReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={onBudgetChange} />}
+        {mode === "simulate" && <Simulation onReport={onReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={onBudgetChange} />}
       </div>
-      <div className="how-it-works" id="how-it-works"><span className="how-icon"><CircleHelp size={17} /></span><div><strong>How the prototype works</strong><p>OpenCV reads your upload; local YOLOv8 detects cars, motorcycles, buses, and trucks. Each bounding-box centre is assigned to one of four image quadrants. A separate deterministic rule distributes your configured green-time budget ({greenBudget}s) fairly.</p></div><span className="how-steps">INPUT <ChevronRight size={12} /> DETECT <ChevronRight size={12} /> RECOMMEND</span></div>
+      <div className="how-it-works" id="how-it-works"><span className="how-icon"><CircleHelp size={17} /></span><div><strong>How the prototype works</strong><p>OpenCV reads your upload; local YOLOv8 detects cars, motorcycles, buses, and trucks. Each approach is tracked over time with IoU multi-object tracking to estimate queue depth, flow rate, and directional demand. A deterministic rule distributes your configured green-time budget ({greenBudget}s) fairly.</p></div><span className="how-steps">INPUT <ChevronRight size={12} /> DETECT & TRACK <ChevronRight size={12} /> RECOMMEND</span></div>
     </section>
   );
 }
@@ -685,15 +892,22 @@ function Results({ report, onUpdateReport }) {
   if (!report) return <section className="section-block results-empty" id="results"><div className="empty-chart"><BarChart3 size={21} /></div><div><h3>Your signal plan will appear here</h3><p>Analyse an upload or run a simulation to generate a direction-by-direction recommendation.</p></div><span className="empty-indicator"><span />AWAITING ANALYSIS</span></section>;
   const y = report.yellow_seconds ?? report.cycle?.yellow_seconds_per_phase ?? 3;
   const fullCycle = report.cycle?.estimated_full_cycle_seconds ?? report.cycle?.total_green_seconds ?? 120;
+  const [selectedPreviewDir, setSelectedPreviewDir] = useState("North");
+
   const data = DIRECTIONS.map((direction) => ({
     direction,
     vehicles: report.counts[direction],
     green: report.green_times[direction],
     red: report.red_times?.[direction] ?? Math.max(0, fullCycle - report.green_times[direction] - y),
   }));
+
+  const activeAnnotatedUrl = report.annotated_files && report.annotated_files[selectedPreviewDir]
+    ? imageUrl(`/uploads/${report.annotated_files[selectedPreviewDir]}`)
+    : imageUrl(report.annotated_url);
+
   return (
     <section className="section-block results-section" id="results">
-      <div className="section-heading result-heading"><div><div className="eyebrow"><span className="eyebrow-line" />ANALYSIS REPORT <span className="report-tag">{report.source === "simulated" ? "SIMULATION" : "LOCAL DETECTION"}</span></div><h2>Signal plan <span className="result-junction">{report.junction_name}</span></h2><p className="section-subtitle"><Clock3 size={14} /> Analysed {formatDate(report.analysed_at)}</p></div><button className="button button-outline" onClick={() => downloadReport(report)}><Download size={15} />Download signal plan</button></div>
+      <div className="section-heading result-heading"><div><div className="eyebrow"><span className="eyebrow-line" />ANALYSIS REPORT <span className="report-tag">{report.source === "simulated" ? "SIMULATION" : report.source === "multi_video" ? "4-DIRECTION VIDEO" : "LOCAL DETECTION"}</span></div><h2>Signal plan <span className="result-junction">{report.junction_name}</span></h2><p className="section-subtitle"><Clock3 size={14} /> Analysed {formatDate(report.analysed_at)}</p></div><button className="button button-outline" onClick={() => downloadReport(report)}><Download size={15} />Download signal plan</button></div>
       <div className="result-grid">
         <div className="result-main">
           <div className="result-card"><div className="result-card-heading"><div><h3>Traffic density & signal timings</h3><p>Vehicle volume compared with green and red light seconds</p></div><div className="chart-legend"><span><i className="legend-vehicles" />Vehicles</span><span><i className="legend-green" />Green seconds</span><span><i className="legend-red" />Red seconds</span></div></div>
@@ -706,7 +920,7 @@ function Results({ report, onUpdateReport }) {
                 <div key={direction}>
                   <span style={{ background: COLORS[direction] }} />
                   <b>{direction}</b>
-                  <strong>{report.counts[direction]}</strong><small>vehicles</small>
+                  <strong>{report.counts[direction]}</strong><small>{report.source === "multi_video" ? "demand" : "vehicles"}</small>
                   <div style={{ display: "flex", gap: "6px", alignItems: "baseline", marginTop: "3px" }}>
                     <em style={{ color: "var(--go)", fontWeight: "bold" }}>G: {g}s</em>
                     <em style={{ color: "var(--stop)", fontWeight: "bold" }}>R: {r}s</em>
@@ -715,11 +929,109 @@ function Results({ report, onUpdateReport }) {
                 </div>
               );
             })}</div>
+
+            {report.directional_metrics && (
+              <div style={{ marginTop: 24, paddingTop: 18, borderTop: "2px solid var(--rule)" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                  <h4 style={{ font: "700 13px var(--font-mono)", textTransform: "uppercase", color: "var(--ink)", margin: 0 }}>
+                    Directional Approach Video Flow Metrics
+                  </h4>
+                  <span style={{ font: "600 11px var(--font-mono)", color: "var(--ink-soft)" }}>
+                    Formula: 0.5×Queue + 0.3×Volume + 0.2×FlowRate
+                  </span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
+                  {DIRECTIONS.map((dir) => {
+                    const m = report.directional_metrics[dir];
+                    if (!m) return null;
+                    return (
+                      <div key={dir} style={{ border: "2px solid var(--rule)", padding: "12px", background: "var(--paper)" }}>
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                          <strong style={{ color: COLORS[dir], font: "700 13px var(--font-mono)" }}>
+                            {dir} Approach
+                          </strong>
+                          <span style={{ background: "var(--surface)", border: "1px solid var(--rule)", padding: "2px 6px", fontSize: "11px", fontWeight: "bold" }}>
+                            {report.counts[dir]} Demand
+                          </span>
+                        </div>
+                        <div style={{ fontSize: "12px", display: "flex", flexDirection: "column", gap: 4, color: "var(--ink-soft)", font: "500 12px var(--font-mono)" }}>
+                          <div>Unique Vehicles: <b style={{ color: "var(--ink)" }}>{m.unique_vehicles}</b></div>
+                          <div>Peak Queue Depth: <b style={{ color: "var(--ink)" }}>{m.peak_queue}</b></div>
+                          <div>Flow Rate: <b style={{ color: "var(--ink)" }}>{m.flow_rate_per_min}/min</b></div>
+                          <div>Clip Duration: <b style={{ color: "var(--ink)" }}>{m.duration_seconds}s</b></div>
+                          <div style={{ marginTop: 4, paddingTop: 4, borderTop: "1px dashed var(--rule)", color: "var(--go)" }}>
+                            Green Allocated: <b>{report.green_times[dir]}s</b>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
           <div className="result-card cycle-card"><div className="result-card-heading"><div><h3>Cycle timing summary</h3><p>Demonstration timing allocation across phases</p></div><span className="cycle-total">{fullCycle}<small>s cycle</small></span></div><CycleAdjuster report={report} onUpdateReport={onUpdateReport} /><div className="cycle-stats"><div><span className="cycle-dot blue-dot" /><small>Total cycle</small><b>{fullCycle}<i>sec</i></b></div><div><span className="cycle-dot green-dot" /><small>Green budget</small><b>{report.cycle.total_green_seconds}<i>sec</i></b></div><div><span className="cycle-dot yellow-dot" /><small>Yellow / phase</small><b>{report.cycle.yellow_seconds_per_phase}<i>sec</i></b></div><div><span className="cycle-dot red-dot" /><small>Avg Red+Yellow wait</small><b>{fullCycle - Math.round(report.cycle.total_green_seconds / 4)}<i>sec</i></b></div></div><p className="cycle-caveat"><Info size={14} />Full cycle length is exactly {fullCycle}s. When an approach has green, remaining {fullCycle - Math.round(report.cycle.total_green_seconds / 4)}s avg serves other directions (red + yellow clearance).</p></div>
         </div>
         <aside className="result-side">
-          <div className="result-card media-card"><div className="result-card-heading"><div><h3>Detection preview</h3><p>Original input and locally annotated frame</p></div></div>{report.original_url && <div className="media-preview-block"><span className="media-label">ORIGINAL UPLOAD</span>{report.source === "video" ? <video src={imageUrl(report.original_url)} controls /> : <img src={imageUrl(report.original_url)} alt="Original junction upload" />}</div>}{report.annotated_url ? <div className="media-preview-block"><span className="media-label">YOLOV8 DETECTIONS</span><img src={imageUrl(report.annotated_url)} alt="Locally annotated vehicle detections" /></div> : <div className="no-media"><FileImage size={22} /><span>Simulation contains no source image.</span></div>}{report.analysis_note && <p className={`media-note ${report.total_vehicle_count === 0 && report.source !== "simulated" ? "media-note-warning" : ""}`}><Info size={13} />{report.analysis_note}</p>}{report.source !== "simulated" && <div className="detection-footer"><span><CarFront size={14} />{report.total_vehicle_count} vehicles detected</span>{report.detections?.length > 0 && <span>Mean confidence {Math.round(report.detections.reduce((sum, item) => sum + item.confidence, 0) / report.detections.length * 100)}%</span>}</div>}</div>
+          <div className="result-card media-card">
+            <div className="result-card-heading">
+              <div>
+                <h3>Detection preview</h3>
+                <p>Original input and locally annotated frame</p>
+              </div>
+            </div>
+
+            {report.annotated_files && Object.keys(report.annotated_files).length > 1 && (
+              <div style={{ display: "flex", gap: 6, marginBottom: 12, flexWrap: "wrap" }}>
+                {Object.keys(report.annotated_files).map((dir) => (
+                  <button
+                    key={dir}
+                    type="button"
+                    onClick={() => setSelectedPreviewDir(dir)}
+                    className="fps-chip"
+                    style={{
+                      borderColor: selectedPreviewDir === dir ? COLORS[dir] : "var(--rule)",
+                      background: selectedPreviewDir === dir ? COLORS[dir] : "transparent",
+                      color: selectedPreviewDir === dir ? "var(--paper)" : "var(--ink)",
+                    }}
+                  >
+                    {dir} Camera
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {report.original_url && report.source !== "multi_video" && (
+              <div className="media-preview-block">
+                <span className="media-label">ORIGINAL UPLOAD</span>
+                {report.source === "video" ? <video src={imageUrl(report.original_url)} controls /> : <img src={imageUrl(report.original_url)} alt="Original junction upload" />}
+              </div>
+            )}
+
+            {activeAnnotatedUrl ? (
+              <div className="media-preview-block">
+                <span className="media-label">
+                  {report.source === "multi_video" ? `${selectedPreviewDir.toUpperCase()} APPROACH TRACKING` : "YOLOV8 DETECTIONS"}
+                </span>
+                <img src={activeAnnotatedUrl} alt="Locally annotated vehicle detections" />
+              </div>
+            ) : (
+              <div className="no-media"><FileImage size={22} /><span>Simulation contains no source image.</span></div>
+            )}
+
+            {report.analysis_note && (
+              <p className={`media-note ${report.total_vehicle_count === 0 && report.source !== "simulated" ? "media-note-warning" : ""}`}>
+                <Info size={13} />{report.analysis_note}
+              </p>
+            )}
+
+            {report.source !== "simulated" && (
+              <div className="detection-footer">
+                <span><CarFront size={14} />{report.total_vehicle_count} {report.source === "multi_video" ? "unique vehicles tracked" : "vehicles detected"}</span>
+                {report.detections?.length > 0 && <span>Mean confidence {Math.round(report.detections.reduce((sum, item) => sum + item.confidence, 0) / report.detections.length * 100)}%</span>}
+              </div>
+            )}
+          </div>
           <div className="why-card"><span className="why-icon"><Sparkles size={15} /></span><div><small>WHY THIS PLAN?</small><p>{report.explanation}</p></div></div>
         </aside>
       </div>

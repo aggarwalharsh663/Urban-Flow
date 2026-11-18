@@ -187,4 +187,9 @@ assert.equal(mainContent.includes('ACTION_SCOPES'), true, 'main.cjs must define 
 assert.equal(mainContent.includes('URBAN_FLOW_IPC_TOKEN'), true, 'main.cjs must pass URBAN_FLOW_IPC_TOKEN to worker');
 console.log('✔ IPC worker session token and action scopes verified');
 
+// Test 17: Multi-video directional analysis IPC action and route configured
+assert.equal(mainContent.includes("'analyse-multi-video': 'inference:write'"), true, 'main.cjs must scope analyse-multi-video');
+assert.equal(mainContent.includes("/api/analyse-multi-video"), true, 'main.cjs must handle /api/analyse-multi-video route');
+console.log('✔ Multi-video action scoping and route verified');
+
 console.log('--- ALL ELECTRON SECURITY TESTS PASSED ---');

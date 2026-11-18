@@ -44,6 +44,7 @@ from security_config import (
     MAX_JUNCTION_NAME_LENGTH,
     MAX_STORAGE_BYTES,
     MAX_UPLOAD_SIZE_BYTES,
+    MAX_VIDEO_UPLOAD_SIZE_BYTES,
     MAX_VEHICLE_COUNT,
     RATE_LIMIT_DEFAULTS,
     SCOPE_ADMIN,
@@ -71,6 +72,9 @@ from services.detection import (
     analyse_video,
     get_detection_status,
     warmup_model,
+)
+from services.video_tracker import (
+    analyse_multi_directional_videos,
 )
 from services.gemini import (
     GeminiAnalysisError,
@@ -674,6 +678,120 @@ async def analyse_video_endpoint(
         all_red_seconds=all_red_seconds,
         use_cloud_ai=use_cloud_ai,
     )
+
+
+@app.post("/api/analyse-multi-video")
+async def analyse_multi_video_endpoint(
+    request: Request,
+    auth_token: Annotated[str, Depends(require_scope(SCOPE_INFERENCE_WRITE))],
+    north_file: Annotated[Optional[UploadFile], File()] = None,
+    south_file: Annotated[Optional[UploadFile], File()] = None,
+    east_file: Annotated[Optional[UploadFile], File()] = None,
+    west_file: Annotated[Optional[UploadFile], File()] = None,
+    junction_name: Annotated[str | None, Form()] = None,
+    green_budget: Annotated[int, Form()] = DEFAULT_GREEN_BUDGET,
+    yellow_seconds: Annotated[int, Form()] = DEFAULT_YELLOW_SECONDS,
+    all_red_seconds: Annotated[int, Form()] = DEFAULT_ALL_RED_SECONDS,
+    sample_fps: Annotated[float, Form()] = 2.0,
+) -> dict:
+    enforce_rate_limit(request, category="inference")
+    file_map = {
+        "North": north_file,
+        "South": south_file,
+        "East": east_file,
+        "West": west_file,
+    }
+    provided_files = {d: f for d, f in file_map.items() if f is not None and getattr(f, "filename", None)}
+    if not provided_files:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="At least one directional video must be uploaded.",
+        )
+
+    saved_paths: dict[str, Path] = {}
+    total_size = 0
+    reservation_id = None
+
+    try:
+        for d, upload_file in provided_files.items():
+            suffix = Path(upload_file.filename).suffix.lower()
+            if suffix not in ALLOWED_VIDEO_EXTENSIONS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Unsupported video type '{suffix}' for {d}. Allowed: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}",
+                )
+
+            dest_filename = f"{uuid.uuid4().hex}{suffix}"
+            dest_path = UPLOAD_DIR / dest_filename
+
+            header = await upload_file.read(32)
+            if not verify_magic_bytes(header, suffix):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"File content does not match expected format for {d}.",
+                )
+
+            await upload_file.seek(0)
+            file_bytes = 0
+            with dest_path.open("wb") as out:
+                while chunk := await upload_file.read(65536):
+                    file_bytes += len(chunk)
+                    if file_bytes > MAX_VIDEO_UPLOAD_SIZE_BYTES:
+                        raise HTTPException(
+                            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                            detail=f"Video for {d} exceeds 150 MB limit.",
+                        )
+                    out.write(chunk)
+
+            total_size += file_bytes
+            saved_paths[d] = dest_path
+
+        reserved, reservation_id = GLOBAL_STORAGE_MANAGER.reserve(total_size)
+        if not reserved:
+            raise HTTPException(
+                status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+                detail="Storage quota exceeded (500 MB limit).",
+            )
+
+        sanitized_name = sanitize_junction_name(junction_name or "Multi-Camera Junction")
+        result = analyse_multi_directional_videos(
+            saved_paths,
+            UPLOAD_DIR,
+            sample_fps=max(0.5, min(10.0, sample_fps)),
+        )
+
+        first_dest_name = saved_paths[list(saved_paths.keys())[0]].name if saved_paths else None
+        report = create_signal_plan(
+            result["counts"],
+            junction_name=sanitized_name,
+            source="multi_video",
+            original_url=f"/uploads/{first_dest_name}" if first_dest_name else None,
+            annotated_url=f"/uploads/{result['annotated_filename']}",
+            detection_count=result["total_count"],
+            detections=result["detections"],
+            analysis_note=result.get("analysis_note"),
+            analysis_provider=result.get("analysis_provider"),
+            green_budget=green_budget,
+            yellow_seconds=yellow_seconds,
+            all_red_seconds=all_red_seconds,
+        )
+        report["directional_metrics"] = result.get("directional_metrics", {})
+        report["annotated_files"] = result.get("annotated_files", {})
+        cleanup_storage(UPLOAD_DIR, REPORT_DIR)
+        return save_report_atomic(report, REPORT_DIR, source_channel="api")
+    except HTTPException:
+        for p in saved_paths.values():
+            if p and p.is_file():
+                p.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        for p in saved_paths.values():
+            if p and p.is_file():
+                p.unlink(missing_ok=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
+    finally:
+        if reservation_id:
+            GLOBAL_STORAGE_MANAGER.release(reservation_id)
 
 
 @app.get("/api/reports/{report_id}")
