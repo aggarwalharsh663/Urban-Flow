@@ -394,6 +394,8 @@ function MultiVideoAnalysis({ onReport, junctionName, greenBudget = 120, onBudge
   const sampleFps = 2.0;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [isDraggingAll, setIsDraggingAll] = useState(false);
+  const masterInputRef = useRef(null);
   const inputRefs = {
     North: useRef(null),
     South: useRef(null),
@@ -401,20 +403,93 @@ function MultiVideoAnalysis({ onReport, junctionName, greenBudget = 120, onBudge
     West: useRef(null),
   };
 
-  const handleSelectFile = (direction, selected) => {
-    if (!selected) return;
+  const validateVideoFile = (selected, prefix = "") => {
+    if (!selected) return "No file selected.";
     const extension = selected.name.toLowerCase().split(".").pop();
     const isVideo = ["mp4", "avi"].includes(extension) || selected.type.startsWith("video/");
     if (!isVideo) {
-      setError(`Video for ${direction} must be an MP4 or AVI file.`);
-      return;
+      return `${prefix ? prefix + ": " : ""}Must be an MP4 or AVI video file (${selected.name}).`;
     }
     if (selected.size > 150 * 1024 * 1024) {
-      setError(`Video for ${direction} is larger than the 150 MB limit.`);
+      return `${prefix ? prefix + ": " : ""}File exceeds the 150 MB limit (${selected.name}).`;
+    }
+    return null;
+  };
+
+  const handleSelectFile = (direction, selected) => {
+    if (!selected) return;
+    const err = validateVideoFile(selected, `Video for ${direction}`);
+    if (err) {
+      setError(err);
       return;
     }
     setError("");
     setFiles((prev) => ({ ...prev, [direction]: selected }));
+  };
+
+  const handleSelectMultipleFiles = (fileList) => {
+    if (!fileList || fileList.length === 0) return;
+    const fileArray = Array.from(fileList);
+
+    for (const f of fileArray) {
+      const err = validateVideoFile(f);
+      if (err) {
+        setError(err);
+        return;
+      }
+    }
+    setError("");
+
+    const newFiles = { ...files };
+    const unassignedFiles = [];
+    const assignedDirections = new Set();
+
+    // 1. Directional keyword matching (e.g. north, south, east, west, cam1..4, _n_)
+    for (const file of fileArray) {
+      const name = file.name.toLowerCase();
+      let matchedDir = null;
+      if (name.includes("north") || name.includes("_n_") || name.includes("-n-") || name.includes("cam1") || name.includes("cam_1")) {
+        matchedDir = "North";
+      } else if (name.includes("south") || name.includes("_s_") || name.includes("-s-") || name.includes("cam2") || name.includes("cam_2")) {
+        matchedDir = "South";
+      } else if (name.includes("east") || name.includes("_e_") || name.includes("-e-") || name.includes("cam3") || name.includes("cam_3")) {
+        matchedDir = "East";
+      } else if (name.includes("west") || name.includes("_w_") || name.includes("-w-") || name.includes("cam4") || name.includes("cam_4")) {
+        matchedDir = "West";
+      }
+
+      if (matchedDir && !assignedDirections.has(matchedDir)) {
+        newFiles[matchedDir] = file;
+        assignedDirections.add(matchedDir);
+      } else {
+        unassignedFiles.push(file);
+      }
+    }
+
+    // 2. Sequential assignment for remaining unassigned files into empty directions
+    const emptyDirections = DIRECTIONS.filter((d) => !assignedDirections.has(d));
+    unassignedFiles.forEach((file, idx) => {
+      if (idx < emptyDirections.length) {
+        const dir = emptyDirections[idx];
+        newFiles[dir] = file;
+        assignedDirections.add(dir);
+      }
+    });
+
+    setFiles(newFiles);
+  };
+
+  const clearAllFiles = () => {
+    setFiles({ North: null, South: null, East: null, West: null });
+    DIRECTIONS.forEach((d) => {
+      if (inputRefs[d]?.current) {
+        inputRefs[d].current.value = "";
+      }
+    });
+    if (masterInputRef.current) {
+      masterInputRef.current.value = "";
+    }
+    setError("");
   };
 
   const removeFile = (direction) => {
@@ -461,16 +536,70 @@ function MultiVideoAnalysis({ onReport, junctionName, greenBudget = 120, onBudge
 
   return (
     <div className="upload-panel">
-      <div>
-        <strong style={{ font: "700 15px var(--font-mono)", color: "var(--ink)" }}>
-          4-Direction Approach Video Selection
-        </strong>
-        <p style={{ margin: "4px 0 0", fontSize: "12px", color: "var(--ink-soft)" }}>
-          Upload dedicated CCTV or camera clips for North, South, East, and West approaches (MP4/AVI up to 120s, max 150 MB each).
-        </p>
+      <input
+        ref={masterInputRef}
+        type="file"
+        multiple
+        accept=".mp4,.avi,video/mp4,video/x-msvideo"
+        hidden
+        onChange={(e) => {
+          handleSelectMultipleFiles(e.target.files);
+          e.target.value = "";
+        }}
+      />
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginBottom: 12 }}>
+        <div>
+          <strong style={{ font: "700 15px var(--font-mono)", color: "var(--ink)" }}>
+            4-Direction Approach Video Selection
+          </strong>
+          <p style={{ margin: "4px 0 0", fontSize: "12px", color: "var(--ink-soft)" }}>
+            Select all approach clips at once or individually for North, South, East, and West approaches (MP4/AVI).
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button
+            type="button"
+            className="button button-primary"
+            style={{ padding: "8px 16px", font: "700 12px var(--font-mono)", display: "inline-flex", alignItems: "center", gap: 6 }}
+            onClick={() => masterInputRef.current?.click()}
+          >
+            <UploadCloud size={16} />
+            Select All Clips at Once
+          </button>
+          {providedCount > 0 && (
+            <button
+              type="button"
+              className="button button-secondary"
+              style={{ padding: "8px 12px", font: "600 12px var(--font-mono)", display: "inline-flex", alignItems: "center", gap: 4 }}
+              onClick={clearAllFiles}
+            >
+              <RotateCcw size={13} />
+              Clear All
+            </button>
+          )}
+        </div>
       </div>
 
-      <div className="multi-video-grid">
+      <div
+        className={`multi-video-grid ${isDraggingAll ? "drag-over-all" : ""}`}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setIsDraggingAll(true);
+        }}
+        onDragLeave={(e) => {
+          if (!e.currentTarget.contains(e.relatedTarget)) {
+            setIsDraggingAll(false);
+          }
+        }}
+        onDrop={(e) => {
+          e.preventDefault();
+          setIsDraggingAll(false);
+          if (e.dataTransfer.files?.length > 0) {
+            handleSelectMultipleFiles(e.dataTransfer.files);
+          }
+        }}
+      >
         {DIRECTIONS.map((dir) => {
           const file = files[dir];
           const Icon = ICONS[dir];
@@ -479,6 +608,17 @@ function MultiVideoAnalysis({ onReport, junctionName, greenBudget = 120, onBudge
               key={dir}
               className={`multi-video-slot ${file ? "has-file" : ""}`}
               style={{ "--direction": COLORS[dir] }}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDraggingAll(false);
+                if (e.dataTransfer.files?.length === 1) {
+                  handleSelectFile(dir, e.dataTransfer.files[0]);
+                } else if (e.dataTransfer.files?.length > 1) {
+                  handleSelectMultipleFiles(e.dataTransfer.files);
+                }
+              }}
             >
               <div className="multi-video-slot-header">
                 <span className="multi-video-badge">

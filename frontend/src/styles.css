@@ -270,6 +270,12 @@ h1,h2,h3,p{margin-top:0}
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 16px;
   margin-top: 14px;
+  transition: outline 0.15s ease-in-out;
+}
+.multi-video-grid.drag-over-all {
+  outline: 3px dashed var(--signal);
+  outline-offset: 6px;
+  border-radius: 4px;
 }
 .multi-video-slot {
   border: 2px dashed var(--rule);
