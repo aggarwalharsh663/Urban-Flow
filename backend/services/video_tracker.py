@@ -304,8 +304,13 @@ class CentroidIoUTracker:
             dx = tr.centroid[0] - tr.initial_centroid[0]
             dy = tr.centroid[1] - tr.initial_centroid[1]
             disp = math.hypot(dx, dy)
-            if disp >= effective_min_disp and abs(dx) > 1.5 * max(abs(dy), 1.0):
+            if disp >= effective_min_disp and abs(dx) > 1.3 * max(abs(dy), 1.0):
                 tr.is_cross_traffic = True
+                tr.is_approach_target = False
+
+            # Exclude distant background beyond intersection horizon (y < 0.32 * h)
+            if tr.centroid[1] < 0.32 * h:
+                tr.is_opposing = True
                 tr.is_approach_target = False
 
         # 2. Identify queued / stopping vehicles at the red light stop line
@@ -572,6 +577,11 @@ def analyse_directional_video_clip(
             if cls_id == 0:
                 continue
 
+            # Filter distant background clutter across the junction horizon (y < 0.32 * height)
+            cy = (box[1] + box[3]) / 2.0
+            if cy < 0.32 * height:
+                continue
+
             # Filter extreme aspect ratios (e.g. power lines or pavement markings)
             bw = box[2] - box[0]
             bh = box[3] - box[1]
@@ -603,18 +613,25 @@ def analyse_directional_video_clip(
 
     summary = tracker.get_summary(duration)
 
-    # Filter visualizer detections to show only monitored approach corridor vehicles
-    # (queueing at red lights and discharging through stopline, excluding opposing lane and cross traffic)
-    corridor_x1, corridor_x2 = tracker.approach_corridor if tracker.approach_corridor else (0.0, float(width))
+    # Filter visualizer detections to show strictly monitored approach vehicles
+    # (matching verified tracks queueing at red lights or discharging through the intersection)
+    all_tracks = list(tracker.tracks.values()) + tracker.retired_tracks
+    approach_tracks = [tr for tr in all_tracks if not tr.is_cross_traffic and not tr.is_opposing]
+
     approach_detections_for_viz = []
     for det in all_detections_for_viz:
         cx = (det["box"][0] + det["box"][2]) / 2.0
-        # Allow small tolerance around approach corridor
-        if (corridor_x1 - 0.05 * width) <= cx <= (corridor_x2 + 0.05 * width):
+        cy = (det["box"][1] + det["box"][3]) / 2.0
+        matched = False
+        for tr in approach_tracks:
+            if compute_iou(det["box"], tr.box) > 0.25 or (abs(cx - tr.centroid[0]) < 65 and abs(cy - tr.centroid[1]) < 65):
+                matched = True
+                break
+        if matched:
             approach_detections_for_viz.append(det)
 
     if not approach_detections_for_viz:
-        approach_detections_for_viz = all_detections_for_viz
+        approach_detections_for_viz = [d for d in all_detections_for_viz if ((d["box"][1] + d["box"][3]) / 2.0) >= 0.32 * height] or all_detections_for_viz
 
     # Generate annotated frame with directional tags and track stats
     annotated_filename = f"{video_path.stem}-{norm_dir.lower()}-annotated.jpg"

@@ -131,6 +131,19 @@ def test_cross_traffic_and_opposing_corridor_filtering():
     assert summary["unique_vehicles"] == 1
 
 
+def test_distant_background_exclusion():
+    tracker = CentroidIoUTracker()
+    frame_shape = (720, 1280, 3)
+    # Distant vehicle in upper background across junction (y = 120 < 0.32 * 720)
+    dets = [
+        {"box": [500, 100, 560, 140], "class": "car", "confidence": 0.85},
+    ]
+    tracker.update(dets, timestamp_sec=0.0, frame_shape=frame_shape)
+    summary = tracker.get_summary(video_duration_sec=10.0)
+    # Distant background outside approach corridor must be excluded from approach demand
+    assert summary["opposing_traffic_filtered"] >= 1
+
+
 def test_validate_directional_video_safety(tmp_path: Path):
     # Empty file
     empty_file = tmp_path / "empty.mp4"
