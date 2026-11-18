@@ -985,10 +985,28 @@ function Results({ report, onUpdateReport }) {
               <div className="cctv-quad-grid">
                 {DIRECTIONS.map((dir) => {
                   const fileName = report.annotated_files?.[dir];
+                  const videoPath = report.original_files?.[dir];
                   const m = report.directional_metrics?.[dir];
                   const g = report.green_times?.[dir] ?? 30;
                   return (
-                    <div key={dir} className="cctv-cam-card" style={{ "--direction": COLORS[dir] }}>
+                    <div
+                      key={dir}
+                      className="cctv-cam-card"
+                      style={{ "--direction": COLORS[dir] }}
+                      onMouseEnter={(e) => {
+                        const vid = e.currentTarget.querySelector("video");
+                        if (vid) {
+                          vid.play().catch(() => {});
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        const vid = e.currentTarget.querySelector("video");
+                        if (vid) {
+                          vid.pause();
+                          vid.currentTime = 0;
+                        }
+                      }}
+                    >
                       <div className="cctv-cam-header">
                         <span className="cctv-cam-title">
                           <DirectionIcon direction={dir} size={13} />
@@ -1010,10 +1028,25 @@ function Results({ report, onUpdateReport }) {
                             <span>No video supplied for {dir}<br />(Baseline floor applied)</span>
                           </div>
                         )}
+                        {videoPath && (
+                          <>
+                            <video
+                              className="cctv-cam-video"
+                              src={imageUrl(videoPath)}
+                              loop
+                              muted
+                              playsInline
+                              preload="metadata"
+                            />
+                            <div className="cctv-cam-play-pill">
+                              <span>▶</span> LIVE CLIP
+                            </div>
+                          </>
+                        )}
                       </div>
                       {m && (
                         <div className="cctv-cam-footer">
-                          <span>Unique: <b>{m.unique_vehicles}</b></span>
+                          <span>Approach: <b>{m.unique_vehicles}</b></span>
                           <span>Queue: <b>{m.peak_queue}</b></span>
                           <span>Flow: <b>{m.flow_rate_per_min}/m</b></span>
                         </div>

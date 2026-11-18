@@ -95,12 +95,17 @@ class VehicleTrack:
     disappeared: int = 0
     total_displacement: float = 0.0
     is_stationary: bool = True
+    is_cross_traffic: bool = False
+    is_opposing: bool = False
+    is_approach_target: bool = True
 
 
 class CentroidIoUTracker:
     """
     Lightweight, deterministic multi-object tracker combining IoU and Euclidean
-    centroid proximity. Requires zero native external libraries.
+    centroid proximity. Features trajectory vector filtering to isolate monitored
+    approach vehicles (queueing at red lights and discharging through the junction)
+    from opposing-lane traffic and perpendicular cross-traffic.
     """
 
     def __init__(self, max_disappeared: int = MAX_DISAPPEARED_FRAMES, min_displacement: float = MIN_DISPLACEMENT_PX):
@@ -111,6 +116,9 @@ class CentroidIoUTracker:
         self.min_displacement = min_displacement
         self.frame_peak_queue = 0
         self.queue_samples: list[int] = []
+        self.frame_width = 1280
+        self.frame_height = 720
+        self.approach_corridor: Optional[tuple[float, float]] = None
 
     def update(self, detections: list[dict], timestamp_sec: float, frame_shape: tuple[int, int]) -> list[VehicleTrack]:
         """
@@ -118,6 +126,8 @@ class CentroidIoUTracker:
         detections format: list of dicts with 'box', 'class', 'confidence'
         """
         h, w = frame_shape[:2]
+        self.frame_width = w
+        self.frame_height = h
         diag = math.hypot(w, h)
         effective_min_disp = max(self.min_displacement, 0.025 * diag)
 
@@ -163,6 +173,9 @@ class CentroidIoUTracker:
                     disappeared=0,
                     total_displacement=0.0,
                     is_stationary=True,
+                    is_cross_traffic=False,
+                    is_opposing=False,
+                    is_approach_target=True,
                 )
                 self.tracks[tid] = new_track
                 current_stationary += 1
@@ -220,6 +233,10 @@ class CentroidIoUTracker:
                 tr.total_displacement = math.hypot(dx, dy)
                 if tr.total_displacement >= effective_min_disp:
                     tr.is_stationary = False
+                    # Detect cross traffic: motion vector has dominant horizontal movement
+                    if abs(dx) > 1.6 * max(abs(dy), 1.0):
+                        tr.is_cross_traffic = True
+                        tr.is_approach_target = False
 
                 if tr.is_stationary:
                     current_stationary += 1
@@ -249,6 +266,9 @@ class CentroidIoUTracker:
                         disappeared=0,
                         total_displacement=0.0,
                         is_stationary=True,
+                        is_cross_traffic=False,
+                        is_opposing=False,
+                        is_approach_target=True,
                     )
                     self.tracks[tid] = new_track
                     current_stationary += 1
@@ -268,13 +288,96 @@ class CentroidIoUTracker:
         return list(self.tracks.values())
 
     def get_summary(self, video_duration_sec: float) -> dict:
+        """
+        Calculates directional traffic metrics filtered specifically for the
+        monitored approach roadway (isolating queueing and discharging vehicles from
+        opposing traffic across the median and cross-traffic through the intersection).
+        """
         all_tracks = list(self.tracks.values()) + self.retired_tracks
-        total_unique = len(all_tracks)
-        moving_count = sum(1 for tr in all_tracks if not tr.is_stationary)
+        w = float(self.frame_width)
+        h = float(self.frame_height)
+        diag = math.hypot(w, h)
+        effective_min_disp = max(self.min_displacement, 0.025 * diag)
+
+        # 1. Identify cross-traffic from complete trajectory history
+        for tr in all_tracks:
+            dx = tr.centroid[0] - tr.initial_centroid[0]
+            dy = tr.centroid[1] - tr.initial_centroid[1]
+            disp = math.hypot(dx, dy)
+            if disp >= effective_min_disp and abs(dx) > 1.5 * max(abs(dy), 1.0):
+                tr.is_cross_traffic = True
+                tr.is_approach_target = False
+
+        # 2. Identify queued / stopping vehicles at the red light stop line
+        queued_tracks = [tr for tr in all_tracks if tr.is_stationary and not tr.is_cross_traffic]
+
+        # 3. Determine the monitored approach corridor (lateral bounds)
+        if queued_tracks:
+            q_xs = [tr.centroid[0] for tr in queued_tracks]
+            corridor_min_x = min(q_xs)
+            corridor_max_x = max(q_xs)
+            span = corridor_max_x - corridor_min_x
+            margin = max(0.08 * w, span * 0.3)
+            corridor_x1 = max(0.0, corridor_min_x - margin)
+            corridor_x2 = min(w, corridor_max_x + margin)
+            self.approach_corridor = (corridor_x1, corridor_x2)
+        else:
+            non_cross = [tr for tr in all_tracks if not tr.is_cross_traffic]
+            if non_cross:
+                xs = [tr.centroid[0] for tr in non_cross]
+                corridor_x1 = max(0.0, min(xs) - 0.05 * w)
+                corridor_x2 = min(w, max(xs) + 0.05 * w)
+                self.approach_corridor = (corridor_x1, corridor_x2)
+            else:
+                self.approach_corridor = (0.0, w)
+
+        corridor_x1, corridor_x2 = self.approach_corridor
+
+        # 4. Determine approach vertical flow direction
+        moving_non_cross = [tr for tr in all_tracks if not tr.is_stationary and not tr.is_cross_traffic]
+        sum_dy = 0.0
+        for tr in moving_non_cross:
+            dy = tr.centroid[1] - tr.initial_centroid[1]
+            if abs(dy) >= effective_min_disp:
+                sum_dy += (1.0 if dy > 0 else -1.0)
+
+        dominant_flow_sign = 1.0 if sum_dy >= 0 else -1.0
+        opposing_disp_thresh = max(self.min_displacement, 0.03 * diag)
+
+        # 5. Filter opposing traffic across the median divider
+        for tr in all_tracks:
+            if tr.is_cross_traffic:
+                continue
+
+            dy = tr.centroid[1] - tr.initial_centroid[1]
+            # If moving significantly in the reverse direction of approach flow
+            if tr.total_displacement >= opposing_disp_thresh and (dy * dominant_flow_sign) < -opposing_disp_thresh:
+                tr.is_opposing = True
+                tr.is_approach_target = False
+                continue
+
+            # If vehicle centroid lies outside the monitored approach corridor
+            cx = tr.centroid[0]
+            if cx < (corridor_x1 - 0.04 * w) or cx > (corridor_x2 + 0.04 * w):
+                tr.is_opposing = True
+                tr.is_approach_target = False
+                continue
+
+            tr.is_approach_target = True
+
+        # 6. Monitored approach tracks
+        approach_tracks = [tr for tr in all_tracks if tr.is_approach_target and not tr.is_cross_traffic and not tr.is_opposing]
+
+        # Graceful fallback: retain valid tracks if corridor filtering was overly strict
+        if not approach_tracks:
+            approach_tracks = [tr for tr in all_tracks if not tr.is_cross_traffic] or all_tracks
+
+        total_unique = len(approach_tracks)
+        moving_count = sum(1 for tr in approach_tracks if not tr.is_stationary)
         stationary_count = total_unique - moving_count
 
         avg_queue = float(np.mean(self.queue_samples)) if self.queue_samples else 0.0
-        peak_queue = self.frame_peak_queue
+        peak_queue = min(self.frame_peak_queue, total_unique) if total_unique > 0 else 0
 
         dur = max(video_duration_sec, 1.0)
         flow_rate_per_min = (total_unique / dur) * 60.0
@@ -296,6 +399,8 @@ class CentroidIoUTracker:
             "flow_rate_per_min": round(flow_rate_per_min, 1),
             "duration_seconds": round(video_duration_sec, 1),
             "effective_demand": demand,
+            "cross_traffic_filtered": sum(1 for tr in all_tracks if tr.is_cross_traffic),
+            "opposing_traffic_filtered": sum(1 for tr in all_tracks if tr.is_opposing),
         }
 
 
@@ -477,10 +582,23 @@ def analyse_directional_video_clip(
 
     summary = tracker.get_summary(duration)
 
+    # Filter visualizer detections to show only monitored approach corridor vehicles
+    # (queueing at red lights and discharging through stopline, excluding opposing lane and cross traffic)
+    corridor_x1, corridor_x2 = tracker.approach_corridor if tracker.approach_corridor else (0.0, float(width))
+    approach_detections_for_viz = []
+    for det in all_detections_for_viz:
+        cx = (det["box"][0] + det["box"][2]) / 2.0
+        # Allow small tolerance around approach corridor
+        if (corridor_x1 - 0.05 * width) <= cx <= (corridor_x2 + 0.05 * width):
+            approach_detections_for_viz.append(det)
+
+    if not approach_detections_for_viz:
+        approach_detections_for_viz = all_detections_for_viz
+
     # Generate annotated frame with directional tags and track stats
     annotated_filename = f"{video_path.stem}-{norm_dir.lower()}-annotated.jpg"
     annotated_path = output_dir / annotated_filename
-    _write_video_annotated_frame(representative_frame, all_detections_for_viz, norm_dir, summary, annotated_path)
+    _write_video_annotated_frame(representative_frame, approach_detections_for_viz, norm_dir, summary, annotated_path)
 
     return {
         "direction": norm_dir,
@@ -488,7 +606,7 @@ def analyse_directional_video_clip(
         "effective_demand": summary["effective_demand"],
         "annotated_filename": annotated_filename,
         "sampled_frames": sampled_count,
-        "detections": all_detections_for_viz,
+        "detections": approach_detections_for_viz,
     }
 
 
@@ -499,14 +617,14 @@ def _write_video_annotated_frame(
     summary: dict,
     output_path: Path,
 ) -> None:
-    """Renders detected vehicles with directional badges and video flow metrics overlay."""
+    """Renders monitored approach vehicles with directional badges and video flow metrics overlay."""
     annotated = frame.copy()
     color = DIRECTION_COLORS_BGR.get(direction, (40, 210, 160))
 
     for det in detections:
         x1, y1, x2, y2 = det["box"]
         cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-        label = f"{det['class']} [{direction}]"
+        label = f"{det['class']} [{direction} Approach]"
         (label_w, label_h), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
         tag_y1 = max(0, y1 - label_h - 6)
         cv2.rectangle(annotated, (x1, tag_y1), (min(frame.shape[1], x1 + label_w + 8), tag_y1 + label_h + 6), color, -1)
@@ -523,7 +641,7 @@ def _write_video_annotated_frame(
 
     # Add HUD information bar at top of frame
     hud_text = (
-        f"Approach: {direction.upper()} | Unique: {summary['unique_vehicles']} | "
+        f"Approach: {direction.upper()} | Monitored: {summary['unique_vehicles']} | "
         f"Peak Queue: {summary['peak_queue']} | Flow: {summary['flow_rate_per_min']}/min | "
         f"Demand: {summary['effective_demand']}"
     )

@@ -87,6 +87,50 @@ def test_tracker_demand_formula():
     assert summary["effective_demand"] > 0
 
 
+def test_cross_traffic_and_opposing_corridor_filtering():
+    tracker = CentroidIoUTracker()
+    frame_shape = (720, 1280, 3)
+
+    # Frame 1:
+    # 1. Approach queue vehicle: at x=700, y=500 (waiting at red light)
+    # 2. Opposing lane vehicle: at x=200, y=300 (other side of road)
+    # 3. Cross-traffic vehicle: at x=400, y=200 (horizontal crossing)
+    f1_dets = [
+        {"box": [680, 480, 740, 540], "class": "car", "confidence": 0.9},
+        {"box": [180, 280, 240, 340], "class": "truck", "confidence": 0.85},
+        {"box": [380, 180, 440, 240], "class": "car", "confidence": 0.88},
+    ]
+    tracker.update(f1_dets, timestamp_sec=0.0, frame_shape=frame_shape)
+
+    # Frame 2 (0.5s later):
+    # Approach vehicle remains stationary in queue (x=700, y=500)
+    # Opposing vehicle moves upward/away (dy = -50) on other side: y=250
+    # Cross vehicle moves horizontally (dx = +120, dy = +5): x=520
+    f2_dets = [
+        {"box": [680, 480, 740, 540], "class": "car", "confidence": 0.9},
+        {"box": [180, 230, 240, 290], "class": "truck", "confidence": 0.85},
+        {"box": [500, 185, 560, 245], "class": "car", "confidence": 0.88},
+    ]
+    tracker.update(f2_dets, timestamp_sec=0.5, frame_shape=frame_shape)
+
+    # Frame 3 (1.0s later):
+    # Approach vehicle discharges forward through green light: dy = +60 (y=560)
+    # Opposing vehicle continues moving away: dy = -100 (y=200)
+    # Cross vehicle continues moving horizontally: dx = +240 (x=640)
+    f3_dets = [
+        {"box": [685, 540, 745, 600], "class": "car", "confidence": 0.9},
+        {"box": [180, 180, 240, 240], "class": "truck", "confidence": 0.85},
+        {"box": [620, 190, 680, 250], "class": "car", "confidence": 0.88},
+    ]
+    tracker.update(f3_dets, timestamp_sec=1.0, frame_shape=frame_shape)
+
+    summary = tracker.get_summary(video_duration_sec=10.0)
+    # Cross traffic and opposing traffic must be filtered, retaining only monitored approach
+    assert summary["cross_traffic_filtered"] >= 1
+    assert summary["opposing_traffic_filtered"] >= 1
+    assert summary["unique_vehicles"] == 1
+
+
 def test_validate_directional_video_safety(tmp_path: Path):
     # Empty file
     empty_file = tmp_path / "empty.mp4"
