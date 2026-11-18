@@ -500,17 +500,18 @@ def analyse_video(video_path: Path, output_dir: Path) -> dict:
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
         raise ValueError("OpenCV could not open this MP4 video.")
-    frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = capture.get(cv2.CAP_PROP_FPS)
-    if frame_count <= 0 or fps <= 0:
-        capture.release()
-        raise ValueError("The video does not contain readable frames.")
+    try:
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        if frame_count <= 0 or fps <= 0:
+            raise ValueError("The video does not contain readable frames.")
 
-    capture.set(cv2.CAP_PROP_POS_FRAMES, frame_count // 2)
-    success, frame = capture.read()
-    capture.release()
-    if not success or frame is None:
-        raise ValueError("Could not read a representative frame from the video.")
+        capture.set(cv2.CAP_PROP_POS_FRAMES, frame_count // 2)
+        success, frame = capture.read()
+        if not success or frame is None:
+            raise ValueError("Could not read a representative frame from the video.")
+    finally:
+        capture.release()
 
     h, w = frame.shape[:2]
     if h > MAX_IMAGE_HEIGHT or w > MAX_IMAGE_WIDTH or (h * w) > MAX_IMAGE_PIXELS:
