@@ -391,7 +391,7 @@ function Simulation({ onReport, junctionName, greenBudget = 120, onBudgetChange 
 
 function MultiVideoAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetChange }) {
   const [files, setFiles] = useState({ North: null, South: null, East: null, West: null });
-  const [sampleFps, setSampleFps] = useState(2.0);
+  const sampleFps = 2.0;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const inputRefs = {
@@ -461,32 +461,13 @@ function MultiVideoAnalysis({ onReport, junctionName, greenBudget = 120, onBudge
 
   return (
     <div className="upload-panel">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
-        <div>
-          <strong style={{ font: "700 15px var(--font-mono)", color: "var(--ink)" }}>
-            4-Direction Approach Video Selection
-          </strong>
-          <p style={{ margin: "4px 0 0", fontSize: "12px", color: "var(--ink-soft)" }}>
-            Upload dedicated CCTV or camera clips for North, South, East, and West approaches (MP4/AVI up to 120s, max 150 MB each).
-          </p>
-        </div>
-        <div className="fps-toggle-group">
-          <span>Sampling Rate:</span>
-          <button
-            type="button"
-            className={`fps-chip ${sampleFps === 2.0 ? "active" : ""}`}
-            onClick={() => setSampleFps(2.0)}
-          >
-            2 FPS (High Precision)
-          </button>
-          <button
-            type="button"
-            className={`fps-chip ${sampleFps === 1.0 ? "active" : ""}`}
-            onClick={() => setSampleFps(1.0)}
-          >
-            1 FPS (Fast CPU)
-          </button>
-        </div>
+      <div>
+        <strong style={{ font: "700 15px var(--font-mono)", color: "var(--ink)" }}>
+          4-Direction Approach Video Selection
+        </strong>
+        <p style={{ margin: "4px 0 0", fontSize: "12px", color: "var(--ink-soft)" }}>
+          Upload dedicated CCTV or camera clips for North, South, East, and West approaches (MP4/AVI up to 120s, max 150 MB each).
+        </p>
       </div>
 
       <div className="multi-video-grid">
