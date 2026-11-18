@@ -194,9 +194,13 @@ class CentroidIoUTracker:
             for i, det in enumerate(detections):
                 iou = compute_iou(tr.box, det["box"])
                 dist = math.hypot(tr.centroid[0] - det_centroids[i][0], tr.centroid[1] - det_centroids[i][1])
-                norm_dist = dist / diag
-                # Composite matching cost: high IoU and low distance produce low cost
-                cost = (1.0 - iou) * 0.7 + min(1.0, norm_dist * 4.0) * 0.3
+                dx = abs(tr.centroid[0] - det_centroids[i][0])
+                # Spatial gating: prevent cross-lane jumping across median or distant screen jumps
+                if dist > 0.12 * diag or dx > 0.10 * w:
+                    cost = 999.0
+                else:
+                    norm_dist = dist / diag
+                    cost = (1.0 - iou) * 0.7 + min(1.0, norm_dist * 4.0) * 0.3
                 row.append(cost)
             cost_matrix.append(row)
 
@@ -235,7 +239,7 @@ class CentroidIoUTracker:
                 if tr.total_displacement >= effective_min_disp:
                     tr.is_stationary = False
                     # Detect cross traffic: motion vector has dominant horizontal movement
-                    if abs(dx) > 1.6 * max(abs(dy), 1.0):
+                    if abs(dx) > 1.25 * max(abs(dy), 1.0):
                         tr.is_cross_traffic = True
                         tr.is_approach_target = False
 
@@ -300,49 +304,71 @@ class CentroidIoUTracker:
         diag = math.hypot(w, h)
         effective_min_disp = max(self.min_displacement, 0.025 * diag)
 
-        # 1. Identify cross-traffic from complete trajectory history
+        # 1. Approach roadway boundaries and cross-traffic isolation
+        # In urban road infrastructure with a central median divider, the incoming approach road
+        # is positioned on the left side of the divider (x <= 0.72 * w), while the exit / opposing
+        # road is on the right side across the median (x > 0.72 * w).
+        # Stopline and intersection horizon is positioned at y >= 0.28 * h.
+        median_x_bound = 0.72 * w
+        horizon_y_bound = 0.28 * h
+
         for tr in all_tracks:
             dx = tr.centroid[0] - tr.initial_centroid[0]
             dy = tr.centroid[1] - tr.initial_centroid[1]
             disp = math.hypot(dx, dy)
-            if disp >= effective_min_disp and abs(dx) > 1.3 * max(abs(dy), 1.0):
+
+            # Lateral cross-traffic crossing the intersection horizontally
+            if disp >= effective_min_disp and abs(dx) > 1.25 * max(abs(dy), 1.0):
                 tr.is_cross_traffic = True
                 tr.is_approach_target = False
 
-            # Exclude distant background beyond intersection horizon (y < 0.32 * h)
-            if tr.centroid[1] < 0.32 * h:
+            # Opposing / exit road across the central median divider
+            if tr.centroid[0] > median_x_bound or tr.initial_centroid[0] > median_x_bound:
+                tr.is_opposing = True
+                tr.is_approach_target = False
+
+            # Distant background beyond intersection stopline horizon
+            if tr.centroid[1] < horizon_y_bound and tr.initial_centroid[1] < horizon_y_bound:
                 tr.is_opposing = True
                 tr.is_approach_target = False
 
         # 2. Identify queued / stopping vehicles at the red light stop line
-        queued_tracks = [tr for tr in all_tracks if tr.is_stationary and not tr.is_cross_traffic]
+        queued_tracks = [
+            tr for tr in all_tracks
+            if tr.is_stationary and not tr.is_cross_traffic and not tr.is_opposing
+            and tr.centroid[0] <= median_x_bound and tr.centroid[1] >= horizon_y_bound
+        ]
 
         # 3. Determine the monitored approach corridor (lateral bounds)
         if queued_tracks:
             q_xs = [tr.centroid[0] for tr in queued_tracks]
-            corridor_min_x = min(q_xs)
-            corridor_max_x = max(q_xs)
-            span = corridor_max_x - corridor_min_x
-            margin = max(0.08 * w, span * 0.3)
-            corridor_x1 = max(0.0, corridor_min_x - margin)
-            corridor_x2 = min(w, corridor_max_x + margin)
-            self.approach_corridor = (corridor_x1, corridor_x2)
+            corridor_min_x = max(0.0, min(q_xs) - 0.08 * w)
+            corridor_max_x = min(median_x_bound, max(q_xs) + 0.08 * w)
+            self.approach_corridor = (corridor_min_x, corridor_max_x)
         else:
-            non_cross = [tr for tr in all_tracks if not tr.is_cross_traffic]
-            if non_cross:
-                xs = [tr.centroid[0] for tr in non_cross]
-                corridor_x1 = max(0.0, min(xs) - 0.05 * w)
-                corridor_x2 = min(w, max(xs) + 0.05 * w)
-                self.approach_corridor = (corridor_x1, corridor_x2)
+            non_opp = [
+                tr for tr in all_tracks
+                if not tr.is_cross_traffic and not tr.is_opposing
+                and tr.centroid[0] <= median_x_bound and tr.centroid[1] >= horizon_y_bound
+            ]
+            if non_opp:
+                xs = [tr.centroid[0] for tr in non_opp]
+                corridor_min_x = max(0.0, min(xs) - 0.05 * w)
+                corridor_max_x = min(median_x_bound, max(xs) + 0.05 * w)
+                self.approach_corridor = (corridor_min_x, corridor_max_x)
             else:
-                self.approach_corridor = (0.0, w)
+                self.approach_corridor = (0.0, median_x_bound)
 
         corridor_x1, corridor_x2 = self.approach_corridor
 
-        # 4. Determine approach vertical flow direction
-        moving_non_cross = [tr for tr in all_tracks if not tr.is_stationary and not tr.is_cross_traffic]
+        # 4. Determine approach vertical flow direction from approach vehicles
+        moving_approach = [
+            tr for tr in all_tracks
+            if not tr.is_stationary and not tr.is_cross_traffic and not tr.is_opposing
+            and corridor_x1 <= tr.centroid[0] <= corridor_x2
+        ]
         sum_dy = 0.0
-        for tr in moving_non_cross:
+        for tr in moving_approach:
             dy = tr.centroid[1] - tr.initial_centroid[1]
             if abs(dy) >= effective_min_disp:
                 sum_dy += (1.0 if dy > 0 else -1.0)
@@ -352,7 +378,7 @@ class CentroidIoUTracker:
 
         # 5. Filter opposing traffic across the median divider
         for tr in all_tracks:
-            if tr.is_cross_traffic:
+            if tr.is_cross_traffic or tr.is_opposing:
                 continue
 
             dy = tr.centroid[1] - tr.initial_centroid[1]
@@ -629,20 +655,38 @@ def analyse_directional_video_clip(
     all_tracks = list(tracker.tracks.values()) + tracker.retired_tracks
     approach_tracks = [tr for tr in all_tracks if not tr.is_cross_traffic and not tr.is_opposing]
 
+    corridor_x1, corridor_x2 = tracker.approach_corridor
+    median_bound = 0.72 * width
+    horizon_bound = 0.28 * height
+
     approach_detections_for_viz = []
     for det in all_detections_for_viz:
         cx = (det["box"][0] + det["box"][2]) / 2.0
         cy = (det["box"][1] + det["box"][3]) / 2.0
+
+        # Spatial check: vehicle must be on approach road (left of median divider, in front of stopline)
+        if cx > median_bound or (cy < horizon_bound and det["box"][3] < 0.32 * height):
+            continue
+
         matched = False
         for tr in approach_tracks:
-            if compute_iou(det["box"], tr.box) > 0.25 or (abs(cx - tr.centroid[0]) < 65 and abs(cy - tr.centroid[1]) < 65):
+            if compute_iou(det["box"], tr.box) > 0.20 or (abs(cx - tr.centroid[0]) < 80 and abs(cy - tr.centroid[1]) < 80):
                 matched = True
                 break
+
+        # Also include approach queue vehicles in the verified lateral approach corridor
+        if not matched and (corridor_x1 - 0.05 * width) <= cx <= (corridor_x2 + 0.05 * width) and cy >= horizon_bound:
+            matched = True
+
         if matched:
             approach_detections_for_viz.append(det)
 
     if not approach_detections_for_viz:
-        approach_detections_for_viz = [d for d in all_detections_for_viz if ((d["box"][1] + d["box"][3]) / 2.0) >= 0.32 * height] or all_detections_for_viz
+        approach_detections_for_viz = [
+            d for d in all_detections_for_viz
+            if ((d["box"][0] + d["box"][2]) / 2.0) <= median_bound
+            and ((d["box"][1] + d["box"][3]) / 2.0) >= horizon_bound
+        ] or all_detections_for_viz
 
     # Generate annotated frame with directional tags and track stats
     annotated_filename = f"{video_path.stem}-{norm_dir.lower()}-annotated.jpg"
