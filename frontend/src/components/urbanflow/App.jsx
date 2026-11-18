@@ -712,7 +712,7 @@ function MultiVideoAnalysis({ onReport, junctionName, greenBudget = 120, onBudge
 }
 
 function AnalysisSection({ onReport, junctionName, greenBudget = 120, onBudgetChange, health }) {
-  const [mode, setMode] = useState("upload");
+  const [mode, setMode] = useState("multi_video");
   return (
     <section className="section-block analysis-section" id="analysis">
       <div className="section-heading">
