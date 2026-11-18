@@ -238,10 +238,6 @@ class CentroidIoUTracker:
                 tr.total_displacement = math.hypot(dx, dy)
                 if tr.total_displacement >= effective_min_disp:
                     tr.is_stationary = False
-                    # Detect cross traffic: motion vector has dominant horizontal movement
-                    if abs(dx) > 1.25 * max(abs(dy), 1.0):
-                        tr.is_cross_traffic = True
-                        tr.is_approach_target = False
 
                 if tr.is_stationary:
                     current_stationary += 1
@@ -306,19 +302,20 @@ class CentroidIoUTracker:
 
         # 1. Approach roadway boundaries and cross-traffic isolation
         # In urban road infrastructure with a central median divider, the incoming approach road
-        # is positioned on the left side of the divider (x <= 0.72 * w), while the exit / opposing
-        # road is on the right side across the median (x > 0.72 * w).
-        # Stopline and intersection horizon is positioned at y >= 0.28 * h.
-        median_x_bound = 0.72 * w
-        horizon_y_bound = 0.28 * h
+        # is positioned on the left side of the divider (x <= 0.60 * w), while the exit / opposing
+        # road is on the right side across the median (x > 0.60 * w).
+        # Stopline and intersection horizon is positioned at y >= 0.30 * h.
+        median_x_bound = 0.60 * w
+        horizon_y_bound = 0.30 * h
+        edge_x_bound = 0.02 * w
 
         for tr in all_tracks:
             dx = tr.centroid[0] - tr.initial_centroid[0]
             dy = tr.centroid[1] - tr.initial_centroid[1]
             disp = math.hypot(dx, dy)
 
-            # Lateral cross-traffic crossing the intersection horizontally
-            if disp >= effective_min_disp and abs(dx) > 1.25 * max(abs(dy), 1.0):
+            # Lateral cross-traffic crossing the intersection horizontally in the junction area
+            if disp >= effective_min_disp and abs(dx) > 1.35 * max(abs(dy), 1.0) and (tr.initial_centroid[1] < 0.36 * h or tr.centroid[1] < 0.36 * h):
                 tr.is_cross_traffic = True
                 tr.is_approach_target = False
 
@@ -327,37 +324,22 @@ class CentroidIoUTracker:
                 tr.is_opposing = True
                 tr.is_approach_target = False
 
+            # Outer screen edge artifacts
+            if tr.centroid[0] < edge_x_bound and tr.initial_centroid[0] < edge_x_bound:
+                tr.is_opposing = True
+                tr.is_approach_target = False
+
             # Distant background beyond intersection stopline horizon
             if tr.centroid[1] < horizon_y_bound and tr.initial_centroid[1] < horizon_y_bound:
                 tr.is_opposing = True
                 tr.is_approach_target = False
 
-        # 2. Identify queued / stopping vehicles at the red light stop line
-        queued_tracks = [
-            tr for tr in all_tracks
-            if tr.is_stationary and not tr.is_cross_traffic and not tr.is_opposing
-            and tr.centroid[0] <= median_x_bound and tr.centroid[1] >= horizon_y_bound
-        ]
+            # Transient noise filter
+            if len(tr.history) < 2 and tr.confidence < 0.40:
+                tr.is_opposing = True
+                tr.is_approach_target = False
 
-        # 3. Determine the monitored approach corridor (lateral bounds)
-        if queued_tracks:
-            q_xs = [tr.centroid[0] for tr in queued_tracks]
-            corridor_min_x = max(0.0, min(q_xs) - 0.08 * w)
-            corridor_max_x = min(median_x_bound, max(q_xs) + 0.08 * w)
-            self.approach_corridor = (corridor_min_x, corridor_max_x)
-        else:
-            non_opp = [
-                tr for tr in all_tracks
-                if not tr.is_cross_traffic and not tr.is_opposing
-                and tr.centroid[0] <= median_x_bound and tr.centroid[1] >= horizon_y_bound
-            ]
-            if non_opp:
-                xs = [tr.centroid[0] for tr in non_opp]
-                corridor_min_x = max(0.0, min(xs) - 0.05 * w)
-                corridor_max_x = min(median_x_bound, max(xs) + 0.05 * w)
-                self.approach_corridor = (corridor_min_x, corridor_max_x)
-            else:
-                self.approach_corridor = (0.0, median_x_bound)
+        self.approach_corridor = (edge_x_bound, median_x_bound)
 
         corridor_x1, corridor_x2 = self.approach_corridor
 
@@ -414,13 +396,12 @@ class CentroidIoUTracker:
         dur = max(video_duration_sec, 1.0)
         flow_rate_per_min = (total_unique / dur) * 60.0
 
-        # Demand formula: 0.5 * PeakQueue + 0.3 * TotalUnique + 0.2 * FlowRatePerMin
+        # In traffic signal control, the approach demand represents the verified unique vehicle count
+        # monitored on that approach roadway (bounded within valid operational vehicle count limits).
         if total_unique == 0:
             demand = 0
         else:
-            raw_demand = (0.5 * peak_queue) + (0.3 * total_unique) + (0.2 * flow_rate_per_min)
-            demand = int(round(raw_demand))
-            demand = max(1, min(MAX_VEHICLE_COUNT, demand))
+            demand = max(1, min(MAX_VEHICLE_COUNT, total_unique))
 
         return {
             "unique_vehicles": total_unique,
@@ -656,8 +637,8 @@ def analyse_directional_video_clip(
     approach_tracks = [tr for tr in all_tracks if not tr.is_cross_traffic and not tr.is_opposing]
 
     corridor_x1, corridor_x2 = tracker.approach_corridor
-    median_bound = 0.72 * width
-    horizon_bound = 0.28 * height
+    median_bound = 0.60 * width
+    horizon_bound = 0.30 * height
 
     approach_detections_for_viz = []
     for det in all_detections_for_viz:
@@ -734,9 +715,8 @@ def _write_video_annotated_frame(
 
     # Add HUD information bar at top of frame
     hud_text = (
-        f"Approach: {direction.upper()} | Monitored: {summary['unique_vehicles']} | "
-        f"Peak Queue: {summary['peak_queue']} | Flow: {summary['flow_rate_per_min']}/min | "
-        f"Demand: {summary['effective_demand']}"
+        f"Approach: {direction.upper()} | Vehicles: {summary['unique_vehicles']} | "
+        f"Peak Queue: {summary['peak_queue']} | Flow: {summary['flow_rate_per_min']}/min"
     )
     (tw, th), tb = cv2.getTextSize(hud_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
     cv2.rectangle(annotated, (0, 0), (annotated.shape[1], th + 16), (20, 24, 33), -1)
