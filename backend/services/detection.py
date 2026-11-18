@@ -29,9 +29,9 @@ except ImportError:
 logger = logging.getLogger("urban_flow.detection")
 
 MODEL_FILES = (
-    "yolov8m.pt",
-    "yolov8s.pt",
     "yolov8n.pt",
+    "yolov8s.pt",
+    "yolov8m.pt",
 )
 VEHICLE_CLASSES = {"car", "motorcycle", "bus", "truck"}
 # COCO class IDs: 0: person, 2: car, 3: motorcycle, 5: bus, 7: truck, 67: cell phone
@@ -150,14 +150,15 @@ def _do_warmup() -> bool:
                 return True
             model = _get_model()
             set_inference_priority()
-            # Use a blank dummy frame matching resolution (720x1280) to preheat PyTorch and OpenMP
-            dummy = np.zeros((720, 1280, 3), dtype=np.uint8)
+            # Pre-compile PyTorch and OpenMP SIMD batch inference kernels
+            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
             model.predict(
-                dummy,
+                [dummy] * 4,
                 verbose=False,
                 classes=DETECTION_CLASS_IDS,
                 conf=0.25,
-                imgsz=1280,
+                imgsz=640,
+                batch=4,
             )
             _model_warmed_up = True
             logger.info("YOLO model background warmup complete.")
