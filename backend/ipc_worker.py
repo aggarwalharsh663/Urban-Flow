@@ -163,17 +163,162 @@ def handle_calculate_signal_plan(data: dict) -> dict:
     return _save_report(report)
 
 
+# --- Safe File Handling & Source Protection (Issue #1) ---
+WINDOWS_RESERVED_DEVICE_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+})
+
+
+def validate_source_path(file_path_str: str) -> Path:
+    """
+    Validate that file_path_str is a safe, existing, readable filesystem path.
+    Rejects non-strings, empty paths, null bytes, Windows reserved devices,
+    missing files, and non-regular files.
+    """
+    if not file_path_str or not isinstance(file_path_str, str):
+        raise ValueError("file_path is required for analysis.")
+
+    if "\0" in file_path_str:
+        raise ValueError("Invalid file path: null characters detected.")
+
+    try:
+        raw_path = Path(file_path_str)
+    except Exception as exc:
+        raise ValueError(f"Invalid filesystem path: {exc}") from exc
+
+    if raw_path.stem.upper() in WINDOWS_RESERVED_DEVICE_NAMES:
+        raise ValueError(f"Invalid file path: reserved device name '{raw_path.stem}'.")
+
+    try:
+        resolved = raw_path.resolve(strict=True)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Source file not found: {file_path_str}")
+    except PermissionError as exc:
+        raise PermissionError(f"Permission denied accessing source file: {file_path_str}") from exc
+    except OSError as exc:
+        raise ValueError(f"Cannot access source file path: {exc}") from exc
+
+    if not resolved.is_file():
+        raise ValueError(f"Specified path is not a regular file: {file_path_str}")
+
+    return resolved
+
+
+def is_application_owned(path: Path) -> bool:
+    """
+    Check if a path is an internal application-owned file inside UPLOAD_DIR.
+    A path is application-owned ONLY if:
+    1. It exists as a regular file.
+    2. Its canonical resolved path is strictly within UPLOAD_DIR.
+    3. It is not a symlink pointing outside UPLOAD_DIR.
+    """
+    try:
+        if not path or not path.is_file():
+            return False
+        resolved = path.resolve(strict=True)
+        return resolved.is_relative_to(UPLOAD_DIR.resolve()) and not path.is_symlink()
+    except Exception:
+        return False
+
+
+def safe_copy_to_upload_dir(
+    src_path: Path,
+    max_size_bytes: int = MAX_UPLOAD_SIZE_BYTES,
+    cancellation_check: Optional[callable] = None,
+) -> tuple[Path, str]:
+    """
+    Safely copy a source file into UPLOAD_DIR using an application-generated UUID name.
+
+    Safety guarantees:
+    - Original file src_path is opened read-only and is NEVER modified, moved, or deleted.
+    - Pre-verifies available disk space before initiating the copy.
+    - Writes to an isolated staging file (staging_<uuid>.tmp) inside UPLOAD_DIR.
+    - Performs buffered chunk streaming (1 MB chunks) to protect against memory spikes.
+    - Enforces maximum size bounds during transfer.
+    - Flushes and fsyncs data to disk before atomic rename.
+    - Cleans up partial staging files immediately if interrupted, cancelled, or on error.
+    - Uses atomic replace to finalize to the destination path.
+    - Applies restricted permissions (0o600 / owner read-write) to the destination.
+    - Returns (dest_path, filename).
+    """
+    if not src_path or not src_path.is_file():
+        raise FileNotFoundError(f"Source file not found: {src_path}")
+
+    stat_info = src_path.stat()
+    file_size = stat_info.st_size
+    if file_size > max_size_bytes:
+        raise ValueError(f"File exceeds maximum allowed size of {max_size_bytes // (1024 * 1024)} MB.")
+    if file_size == 0:
+        raise ValueError("Uploaded file is empty.")
+
+    # Check available storage on disk (require file_size + 10MB safety cushion)
+    disk_usage = shutil.disk_usage(UPLOAD_DIR)
+    required_space = file_size + (10 * 1024 * 1024)
+    if disk_usage.free < required_space:
+        raise OSError(
+            f"Insufficient disk space in upload storage: {disk_usage.free} bytes free, "
+            f"{required_space} bytes required."
+        )
+
+    suffix = src_path.suffix.lower()
+    dest_uuid = uuid.uuid4().hex
+    filename = f"{dest_uuid}{suffix}"
+    dest_path = UPLOAD_DIR / filename
+    while dest_path.exists():
+        dest_uuid = uuid.uuid4().hex
+        filename = f"{dest_uuid}{suffix}"
+        dest_path = UPLOAD_DIR / filename
+
+    staging_path = UPLOAD_DIR / f"staging_{dest_uuid}.tmp"
+    copied_bytes = 0
+
+    try:
+        if cancellation_check and cancellation_check():
+            raise RuntimeError("Operation was cancelled before copying commenced.")
+
+        with open(src_path, "rb") as fsrc, open(staging_path, "wb") as fdst:
+            while True:
+                if cancellation_check and cancellation_check():
+                    raise RuntimeError("File copying was cancelled.")
+                chunk = fsrc.read(1024 * 1024)  # 1 MB chunk
+                if not chunk:
+                    break
+                copied_bytes += len(chunk)
+                if copied_bytes > max_size_bytes:
+                    raise ValueError(
+                        f"File exceeds maximum allowed size of {max_size_bytes // (1024 * 1024)} MB."
+                    )
+                fdst.write(chunk)
+            fdst.flush()
+            os.fsync(fdst.fileno())
+
+        # Verify copied size matches source size
+        if copied_bytes != file_size:
+            raise IOError(
+                f"Copy verification failed: expected {file_size} bytes, wrote {copied_bytes} bytes."
+            )
+
+        secure_file_permissions(staging_path)
+
+        # Atomic finalization
+        staging_path.replace(dest_path)
+        return dest_path, filename
+
+    except Exception:
+        staging_path.unlink(missing_ok=True)
+        raise
+
+
 def handle_analyse(data: dict, video: bool = False, req_id: Optional[str] = None) -> dict:
     file_path_str = data.get("file_path")
-    if not file_path_str:
-        raise ValueError("file_path is required for analysis.")
-    src_path = Path(file_path_str).resolve()
-    if not src_path.is_file():
-        raise FileNotFoundError(f"Source file not found: {file_path_str}")
+    src_path = validate_source_path(file_path_str)
 
-    # Enforce maximum upload size before reading/moving (Finding 4, 12)
+    # Enforce maximum upload size before reading/copying (Finding 4, 12)
     file_size = src_path.stat().st_size
-    if file_size > MAX_UPLOAD_SIZE_BYTES:
+    max_size = MAX_UPLOAD_SIZE_BYTES
+    if file_size > max_size:
         raise ValueError("File exceeds maximum allowed size of 100 MB.")
     if file_size == 0:
         raise ValueError("Uploaded file is empty.")
@@ -192,24 +337,25 @@ def handle_analyse(data: dict, video: bool = False, req_id: Optional[str] = None
         if suffix not in allowed or suffix not in ALLOWED_EXTENSIONS:
             raise ValueError(f"Unsupported file type '{suffix}'. Use: {', '.join(sorted(allowed))}")
 
-        # Verify magic bytes
+        # Verify magic bytes on source file
         with src_path.open("rb") as f:
             header = f.read(32)
         if not verify_magic_bytes(header, suffix):
             raise ValueError(f"Magic bytes verification failed for '{suffix}'. File is invalid or spoofed.")
 
-        # Validate image or video dimensions and decodability
+        # Validate image or video dimensions and decodability on source file
         if video:
             validate_video_file(src_path)
         else:
             validate_image_file(src_path)
 
-        # Move file into UPLOAD_DIR with randomized name to eliminate duplicate file storage
-        filename = f"{uuid.uuid4().hex}{suffix}"
-        dest_path = UPLOAD_DIR / filename
+        # Safely copy into UPLOAD_DIR with randomized UUID name (Issue #1: Never move or delete user's source file)
+        dest_path, filename = safe_copy_to_upload_dir(
+            src_path,
+            max_size_bytes=max_size,
+            cancellation_check=lambda: is_request_cancelled(req_id),
+        )
         GLOBAL_STORAGE_MANAGER.mark_active(dest_path)
-        if src_path != dest_path:
-            shutil.move(str(src_path), str(dest_path))
 
         if req_id and is_request_cancelled(req_id):
             raise RuntimeError(f"Request {req_id} was cancelled before inference.")
@@ -261,10 +407,10 @@ def handle_analyse(data: dict, video: bool = False, req_id: Optional[str] = None
         cleanup_storage(UPLOAD_DIR, REPORT_DIR)
         return _save_report(report)
     except Exception:
+        # Clean up only application-owned working copy in UPLOAD_DIR on failure/cancellation
         if dest_path and dest_path.is_file():
             dest_path.unlink(missing_ok=True)
-        if src_path and src_path.is_file() and src_path != dest_path:
-            src_path.unlink(missing_ok=True)
+        # CRITICAL: Never delete or unlink src_path under any circumstances
         raise
     finally:
         GLOBAL_STORAGE_MANAGER.unmark_active(src_path)
@@ -281,6 +427,7 @@ def handle_analyse_multi_video(data: dict, req_id: Optional[str] = None) -> dict
     total_size = 0
     src_paths: dict[str, Path] = {}
     dest_paths: dict[str, Path] = {}
+    created_dest_files: list[Path] = []
 
     for dir_name, fpath_str in videos.items():
         if not fpath_str:
@@ -288,9 +435,7 @@ def handle_analyse_multi_video(data: dict, req_id: Optional[str] = None) -> dict
         norm_dir = dir_name.capitalize()
         if norm_dir not in DIRECTIONS:
             raise ValueError(f"Invalid direction: {dir_name}. Must be North, South, East, or West.")
-        src = Path(fpath_str).resolve()
-        if not src.is_file():
-            raise FileNotFoundError(f"Source video file not found for {norm_dir}: {fpath_str}")
+        src = validate_source_path(fpath_str)
         size = src.stat().st_size
         if size > MAX_VIDEO_UPLOAD_SIZE_BYTES:
             raise ValueError(f"Video for {norm_dir} exceeds maximum allowed size of 150 MB.")
@@ -315,15 +460,16 @@ def handle_analyse_multi_video(data: dict, req_id: Optional[str] = None) -> dict
         raise ValueError("Storage quota exceeded (500 MB limit). Automatic cleanup could not free sufficient space.")
 
     try:
+        # Safely copy each directional video into UPLOAD_DIR
         for norm_dir, src in src_paths.items():
-            GLOBAL_STORAGE_MANAGER.mark_active(src)
-            suffix = src.suffix.lower()
-            filename = f"{uuid.uuid4().hex}{suffix}"
-            dest = UPLOAD_DIR / filename
-            GLOBAL_STORAGE_MANAGER.mark_active(dest)
-            if src != dest:
-                shutil.move(str(src), str(dest))
+            dest, filename = safe_copy_to_upload_dir(
+                src,
+                max_size_bytes=MAX_VIDEO_UPLOAD_SIZE_BYTES,
+                cancellation_check=lambda: is_request_cancelled(req_id),
+            )
+            created_dest_files.append(dest)
             dest_paths[norm_dir] = dest
+            GLOBAL_STORAGE_MANAGER.mark_active(dest)
 
         if req_id and is_request_cancelled(req_id):
             raise RuntimeError(f"Request {req_id} was cancelled before inference.")
@@ -365,17 +511,14 @@ def handle_analyse_multi_video(data: dict, req_id: Optional[str] = None) -> dict
         cleanup_storage(UPLOAD_DIR, REPORT_DIR)
         return _save_report(report)
     except Exception:
-        for dest in dest_paths.values():
+        # Clean up only application-owned copies in UPLOAD_DIR on failure/cancellation
+        for dest in created_dest_files:
             if dest and dest.is_file():
                 dest.unlink(missing_ok=True)
-        for src in src_paths.values():
-            if src and src.is_file() and src not in dest_paths.values():
-                src.unlink(missing_ok=True)
+        # CRITICAL: Never delete or unlink any src in src_paths under any circumstances
         raise
     finally:
-        for src in src_paths.values():
-            GLOBAL_STORAGE_MANAGER.unmark_active(src)
-        for dest in dest_paths.values():
+        for dest in created_dest_files:
             GLOBAL_STORAGE_MANAGER.unmark_active(dest)
         GLOBAL_STORAGE_MANAGER.release(res_id)
 
