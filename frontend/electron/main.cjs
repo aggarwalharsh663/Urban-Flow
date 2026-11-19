@@ -234,6 +234,7 @@ const IPC_SESSION_TOKEN = crypto.randomBytes(32).toString('hex');
 
 const ACTION_SCOPES = {
   'health': 'read',
+  'copyright': 'read',
   'directions': 'read',
   'get-report': 'read',
   'simulate': 'reports:write',
@@ -367,6 +368,7 @@ function sendIpcRequest(action, data = {}, timeoutMs = 30000, scope = null) {
 // Explicit Action Allowlist for IPC Worker Invocations (R2 & SEC-RES-05)
 const ALLOWED_IPC_ACTIONS = new Set([
   'health',
+  'copyright',
   'directions',
   'simulate',
   'calculate-signal-plan',

@@ -649,6 +649,7 @@ def handle_cancel(data: dict) -> dict:
 # --- IPC Worker Authentication & Action Scoping (U-02) ---
 ACTION_REQUIRED_SCOPES = {
     "health": "read",
+    "copyright": "read",
     "directions": "read",
     "get-report": "read",
     "simulate": "reports:write",
