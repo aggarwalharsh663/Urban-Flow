@@ -42,4 +42,6 @@ def test_unauthenticated_health_triggers_warmup_without_schema_leak():
         "status": "ok",
         "privacy_mode": "local_default",
         "storage": "local",
+        "author": "Harsh Aggarwal",
+        "copyright": "Copyright (c) 2026 Harsh Aggarwal. All rights reserved.",
     }

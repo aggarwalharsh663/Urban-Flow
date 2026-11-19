@@ -48,6 +48,7 @@ from services.detection import (
     ModelUnavailableError,
     analyse_image,
     analyse_video,
+    configure_pytorch_threads,
     get_detection_status,
     warmup_model,
 )
@@ -789,6 +790,12 @@ def process_ipc_request(req: dict) -> dict:
 
 
 def main():
+    # Centralized PyTorch thread configuration at startup to prevent oversubscription (Issue #5)
+    try:
+        configure_pytorch_threads()
+    except Exception as exc:
+        LOGGER.warning("Could not initialize centralized PyTorch thread settings: %s", exc)
+
     # Signal readiness to Electron
     print(json.dumps({"event": "ready", "app": "urban_flow"}), flush=True)
     warmup_model(async_mode=True)

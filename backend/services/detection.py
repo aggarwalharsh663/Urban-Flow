@@ -59,6 +59,152 @@ _inference_lock = threading.RLock()
 _model_warmed_up = False
 _warmup_thread: threading.Thread | None = None
 
+_pytorch_configured = False
+_pytorch_config_lock = threading.Lock()
+_configured_threads: dict[str, int] = {"intra_op": 0, "inter_op": 0}
+
+
+def get_pytorch_thread_config() -> dict[str, int]:
+    """Return the current PyTorch intra-op and inter-op thread counts."""
+    try:
+        import torch
+        return {
+            "intra_op": torch.get_num_threads(),
+            "inter_op": torch.get_num_interop_threads(),
+        }
+    except Exception:
+        return dict(_configured_threads)
+
+
+def compute_optimal_pytorch_threads(
+    cpu_cores: int | None = None,
+) -> tuple[int, int]:
+    """
+    Calculate optimal intra-op and inter-op thread counts for CPU-based PyTorch inference.
+
+    Prevents CPU oversubscription and thread contention when concurrent video
+    decoding workers (OpenCV) and Electron UI processes are active.
+
+    Rules:
+    - Checks environment variables URBANFLOW_TORCH_THREADS and TORCH_NUM_THREADS
+    - Checks URBANFLOW_TORCH_INTEROP_THREADS
+    - Adaptive defaults based on hardware topology:
+      * <= 2 cores: 1 intra-op, 1 inter-op
+      * <= 4 cores: 2 intra-op, 1 inter-op (reserves 2 cores for video decode/IPC/UI)
+      * <= 8 cores: 4 intra-op, 2 inter-op (reserves 4 cores for up to 4 parallel approaches)
+      * > 8 cores: min(8, max(4, cpu_cores // 2)) intra-op, min(4, max(1, cpu_cores // 4)) inter-op
+    """
+    if cpu_cores is None:
+        cpu_cores = os.cpu_count() or 4
+    cpu_cores = max(1, cpu_cores)
+
+    env_threads = os.getenv("URBANFLOW_TORCH_THREADS") or os.getenv("TORCH_NUM_THREADS")
+    env_interop = os.getenv("URBANFLOW_TORCH_INTEROP_THREADS")
+
+    if env_threads:
+        try:
+            intra_op = max(1, min(cpu_cores, int(env_threads.strip())))
+        except ValueError:
+            intra_op = 2
+    else:
+        if cpu_cores <= 2:
+            intra_op = 1
+        elif cpu_cores <= 4:
+            intra_op = 2
+        elif cpu_cores <= 8:
+            intra_op = 4
+        else:
+            intra_op = min(8, max(4, cpu_cores // 2))
+
+    if env_interop:
+        try:
+            inter_op = max(1, min(cpu_cores, int(env_interop.strip())))
+        except ValueError:
+            inter_op = 1
+    else:
+        if cpu_cores <= 4:
+            inter_op = 1
+        elif cpu_cores <= 8:
+            inter_op = 2
+        else:
+            inter_op = min(4, max(1, cpu_cores // 4))
+
+    return intra_op, inter_op
+
+
+def configure_pytorch_threads(
+    num_threads: int | None = None,
+    num_interop_threads: int | None = None,
+    force: bool = False,
+) -> dict[str, int]:
+    """
+    Centralized, hardware-adaptive PyTorch intra-op and inter-op thread configuration (Issue #5).
+
+    Configures PyTorch CPU thread pools once at startup or model initialization to
+    prevent thread oversubscription, CPU thrashing, and configuration races across
+    concurrent multi-approach video analysis workers.
+    """
+    global _pytorch_configured, _configured_threads
+
+    with _pytorch_config_lock:
+        if _pytorch_configured and not force:
+            return dict(_configured_threads)
+
+        default_intra, default_inter = compute_optimal_pytorch_threads()
+        target_intra = num_threads if num_threads is not None else default_intra
+        target_inter = num_interop_threads if num_interop_threads is not None else default_inter
+
+        try:
+            import torch
+
+            # 1. Configure inter-op parallelism (safe only before parallel work begins or set_num_interop_threads called)
+            try:
+                torch.set_num_interop_threads(target_inter)
+            except RuntimeError as exc:
+                # Occurs if PyTorch has already started parallel workloads in this process
+                logger.debug("PyTorch inter-op threads could not be modified: %s", exc)
+            except Exception as exc:
+                logger.debug("Unexpected error setting inter-op threads: %s", exc)
+
+            # 2. Configure intra-op parallelism
+            try:
+                torch.set_num_threads(target_intra)
+            except Exception as exc:
+                logger.warning("Failed setting PyTorch intra-op threads to %d: %s", target_intra, exc)
+
+            _configured_threads = {
+                "intra_op": torch.get_num_threads(),
+                "inter_op": torch.get_num_interop_threads(),
+            }
+        except ImportError:
+            _configured_threads = {
+                "intra_op": target_intra,
+                "inter_op": target_inter,
+            }
+        except Exception as exc:
+            logger.warning("Error configuring PyTorch threading: %s", exc)
+            _configured_threads = {
+                "intra_op": target_intra,
+                "inter_op": target_inter,
+            }
+
+        _pytorch_configured = True
+        logger.info(
+            "PyTorch thread pool configured: intra-op=%d, inter-op=%d (CPU cores=%d)",
+            _configured_threads.get("intra_op", 0),
+            _configured_threads.get("inter_op", 0),
+            os.cpu_count() or 4,
+        )
+        return dict(_configured_threads)
+
+
+def reset_pytorch_thread_config_state_for_testing():
+    """Reset the thread configuration guard flag (for automated testing only)."""
+    global _pytorch_configured, _configured_threads
+    with _pytorch_config_lock:
+        _pytorch_configured = False
+        _configured_threads = {"intra_op": 0, "inter_op": 0}
+
 
 def get_inference_lock() -> threading.RLock:
     """
@@ -142,6 +288,7 @@ def get_detection_status() -> dict:
         "missing_dependencies": missing_dependencies,
         "model_available": model_path is not None,
         "model_name": model_path.name if model_path else None,
+        "pytorch_threads": get_pytorch_thread_config(),
     }
 
 
@@ -171,6 +318,7 @@ def _get_model():
                 "Untrusted or corrupt weights file detected. Standard models must match pinned hashes, "
                 "and custom models require CUSTOM_TRUSTED_MODEL_SHA256 or ALLOW_CUSTOM_UNPINNED_MODELS=true."
             )
+        configure_pytorch_threads()
         set_inference_priority()
         from ultralytics import YOLO
 

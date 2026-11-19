@@ -22,6 +22,7 @@ from typing import Callable, Optional
 
 import cv2
 import numpy as np
+import torch
 
 try:
     from security_config import (
@@ -38,7 +39,9 @@ try:
         _available_model_path,
         _get_model,
         _is_duplicate_or_enclosed,
+        configure_pytorch_threads,
         get_inference_lock,
+        get_pytorch_thread_config,
         set_inference_priority,
     )
 except ImportError:
@@ -56,7 +59,9 @@ except ImportError:
         _available_model_path,
         _get_model,
         _is_duplicate_or_enclosed,
+        configure_pytorch_threads,
         get_inference_lock,
+        get_pytorch_thread_config,
         set_inference_priority,
     )
 
@@ -517,16 +522,6 @@ def analyse_directional_video_clip(
     model = _get_model()
     set_inference_priority()
 
-    # Hardware-adaptive CPU thread tuning for low-spec edge PCs (Core i3/i5 8th gen) vs high-core workstations
-    import os
-    import torch
-    cpu_cores = os.cpu_count() or 4
-    optimal_threads = max(1, min(4, cpu_cores // 2)) if cpu_cores <= 4 else max(2, min(8, cpu_cores // 4))
-    try:
-        torch.set_num_threads(optimal_threads)
-    except Exception:
-        pass
-
     tracker = CentroidIoUTracker()
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
@@ -572,6 +567,7 @@ def analyse_directional_video_clip(
         raise ValueError("Could not extract any valid sampled frames from the video.")
 
     # Vectorized batch YOLO inference with PyTorch inference mode (zero autograd tracking memory)
+    cpu_cores = os.cpu_count() or 4
     batch_size = 8 if cpu_cores <= 4 else 16
     all_res = []
     with torch.inference_mode():
@@ -780,6 +776,7 @@ def analyse_multi_directional_videos(
             }
 
     if provided_approaches:
+        configure_pytorch_threads()
         cpu_cores = os.cpu_count() or 4
         # Hardware-adaptive concurrency: on dual-core / quad-core edge devices (Core i3/i5 <= 4 cores),
         # throttle to 2 parallel workers to avoid thread thrashing and memory exhaustion.
