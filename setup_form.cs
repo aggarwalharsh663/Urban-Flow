@@ -127,6 +127,7 @@ namespace UrbanFlowSetup
         public SetupForm(string initialPath = null)
         {
             InitializeComponent();
+
             if (!string.IsNullOrWhiteSpace(initialPath))
             {
                 txtInstallPath.Text = initialPath.Trim('"', ' ');
@@ -299,25 +300,52 @@ namespace UrbanFlowSetup
             return true;
         }
 
-        private void CloseExistingProcesses(string targetDir)
+        private static void CloseExistingProcesses(string targetDir)
         {
             try
             {
-                foreach (Process p in Process.GetProcessesByName("Urban Flow"))
+                string[] procNames = new string[] { "Urban Flow", "electron", "python", "pythonw", "node" };
+                foreach (string name in procNames)
                 {
-                    try { p.CloseMainWindow(); p.WaitForExit(1000); } catch { }
-                }
-                foreach (Process p in Process.GetProcessesByName("electron"))
-                {
-                    try
+                    foreach (Process p in Process.GetProcessesByName(name))
                     {
-                        if (p.MainModule != null && p.MainModule.FileName.IndexOf("Urban Flow", StringComparison.OrdinalIgnoreCase) >= 0)
+                        try
                         {
-                            p.Kill();
-                            p.WaitForExit(1000);
+                            bool shouldKill = false;
+                            try
+                            {
+                                if (name.Equals("Urban Flow", StringComparison.OrdinalIgnoreCase))
+                                {
+                                    shouldKill = true;
+                                }
+                                else if (p.MainModule != null && !string.IsNullOrEmpty(p.MainModule.FileName))
+                                {
+                                    string path = p.MainModule.FileName;
+                                    if (path.IndexOf("Urban Flow", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                        (!string.IsNullOrEmpty(targetDir) && path.StartsWith(targetDir, StringComparison.OrdinalIgnoreCase)))
+                                    {
+                                        shouldKill = true;
+                                    }
+                                }
+                            }
+                            catch
+                            {
+                                if (name.Equals("Urban Flow", StringComparison.OrdinalIgnoreCase))
+                                    shouldKill = true;
+                            }
+
+                            if (shouldKill)
+                            {
+                                try { p.CloseMainWindow(); p.WaitForExit(600); } catch { }
+                                if (!p.HasExited)
+                                {
+                                    p.Kill();
+                                    p.WaitForExit(1000);
+                                }
+                            }
                         }
+                        catch { }
                     }
-                    catch { }
                 }
             }
             catch { }
@@ -345,160 +373,258 @@ namespace UrbanFlowSetup
 
             Thread worker = new Thread(() =>
             {
-                try
+                bool success = PerformInstallationCore(targetDir, createShortcut, launch, (pct, status) =>
                 {
-                    this.Invoke((MethodInvoker)delegate
+                    try
                     {
-                        lblStatus.Text = "Closing existing Urban Flow instances...";
-                    });
-                    CloseExistingProcesses(targetDir);
-                    Thread.Sleep(300);
-
-                    this.Invoke((MethodInvoker)delegate
-                    {
-                        lblStatus.Text = "Preparing installation directory...";
-                    });
-                    if (!Directory.Exists(targetDir))
-                    {
-                        Directory.CreateDirectory(targetDir);
-                    }
-
-                    Assembly asm = Assembly.GetExecutingAssembly();
-                    using (Stream zipStream = asm.GetManifestResourceStream("urban_flow_payload.zip"))
-                    {
-                        if (zipStream == null)
+                        if (this.InvokeRequired)
                         {
-                            throw new FileNotFoundException("Embedded installation payload 'urban_flow_payload.zip' not found in executable.");
-                        }
-
-                        // Stream-based direct zip extraction without duplicate memory buffers
-                        using (ZipArchive archive = new ZipArchive(zipStream, ZipArchiveMode.Read))
-                        {
-                            int total = archive.Entries.Count;
-                            int count = 0;
-
-                            foreach (ZipArchiveEntry entry in archive.Entries)
+                            this.Invoke((MethodInvoker)delegate
                             {
-                                count++;
-                                string fullDestPath;
-                                if (!IsSafeZipEntry(entry.FullName, targetDir, out fullDestPath))
+                                if (pct >= 0)
                                 {
-                                    continue;
-                                }
-
-                                if (string.IsNullOrEmpty(entry.Name))
-                                {
-                                    if (!Directory.Exists(fullDestPath))
-                                        Directory.CreateDirectory(fullDestPath);
+                                    progressBar.Value = Math.Min(100, Math.Max(0, pct));
+                                    lblStatus.Text = status;
+                                    if (pct == 100)
+                                    {
+                                        lblStatus.ForeColor = Color.FromArgb(46, 213, 115);
+                                    }
                                 }
                                 else
                                 {
-                                    string dir = Path.GetDirectoryName(fullDestPath);
-                                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
-                                        Directory.CreateDirectory(dir);
-
-                                    entry.ExtractToFile(fullDestPath, true);
-                                    UnblockFile(fullDestPath);
+                                    progressBar.Visible = false;
+                                    lblStatus.Text = status;
+                                    lblStatus.ForeColor = Color.FromArgb(239, 68, 68);
+                                    btnInstall.Enabled = true;
+                                    txtInstallPath.Enabled = true;
                                 }
-
-                                if (count % 100 == 0 || count == total)
-                                {
-                                    int pct = (int)((count * 100.0) / total);
-                                    this.Invoke((MethodInvoker)delegate
-                                    {
-                                        progressBar.Value = pct;
-                                        lblStatus.Text = string.Format("Extracting components ({0}%)... {1}", pct, entry.Name);
-                                    });
-                                }
-                            }
+                            });
                         }
                     }
+                    catch { }
+                });
 
-                    // Recursively unblock all native addons and executables
-                    this.Invoke((MethodInvoker)delegate
-                    {
-                        lblStatus.Text = "Configuring system security permissions...";
-                    });
-                    UnblockDirectory(targetDir);
-
-                    if (createShortcut)
+                try
+                {
+                    if (this.InvokeRequired)
                     {
                         this.Invoke((MethodInvoker)delegate
                         {
-                            lblStatus.Text = "Creating Desktop shortcut...";
+                            if (success)
+                            {
+                                MessageBox.Show(
+                                    "Urban Flow has been successfully installed!\n\nAll components, local AI models, and video analysis engines are ready to run.\n\nLocation: " + targetDir,
+                                    "Urban Flow Installed",
+                                    MessageBoxButtons.OK,
+                                    MessageBoxIcon.Information
+                                );
+                                this.Close();
+                            }
+                            else
+                            {
+                                MessageBox.Show(
+                                    "Installation encountered an error.\nPlease check 'install.log' in the installation directory for details.",
+                                    "Error",
+                                    MessageBoxButtons.OK,
+                                    MessageBoxIcon.Error
+                                );
+                            }
                         });
-                        CreateShortcuts(targetDir);
                     }
-
-                    this.Invoke((MethodInvoker)delegate
-                    {
-                        progressBar.Value = 100;
-                        lblStatus.Text = "Installation completed successfully!";
-                        lblStatus.ForeColor = Color.FromArgb(46, 213, 115);
-                    });
-
-                    if (launch)
-                    {
-                        LaunchApp(targetDir);
-                    }
-
-                    this.Invoke((MethodInvoker)delegate
-                    {
-                        MessageBox.Show(
-                            "Urban Flow has been successfully installed!\n\nAll components, local AI models, and video analysis engines are ready to run.\n\nLocation: " + targetDir,
-                            "Urban Flow Installed",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Information
-                        );
-                        this.Close();
-                    });
                 }
-                catch (Exception ex)
-                {
-                    this.Invoke((MethodInvoker)delegate
-                    {
-                        progressBar.Visible = false;
-                        lblStatus.Text = "Installation error: " + ex.Message;
-                        lblStatus.ForeColor = Color.FromArgb(239, 68, 68);
-                        btnInstall.Enabled = true;
-                        txtInstallPath.Enabled = true;
-                        MessageBox.Show("Installation failed:\n\n" + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    });
-                }
+                catch { }
             });
 
             worker.IsBackground = true;
             worker.Start();
         }
 
-        private void CreateShortcuts(string targetDir)
+        public static bool PerformInstallationCore(string targetDir, bool createShortcut, bool launch, Action<int, string> progress)
+        {
+            string logFile = Path.Combine(targetDir, "install.log");
+            try
+            {
+                if (progress != null) progress(0, "Closing existing Urban Flow instances...");
+                CloseExistingProcesses(targetDir);
+                Thread.Sleep(300);
+
+                if (progress != null) progress(2, "Preparing installation directory...");
+                if (!Directory.Exists(targetDir))
+                {
+                    Directory.CreateDirectory(targetDir);
+                }
+
+                try
+                {
+                    File.WriteAllText(logFile, string.Format("[{0}] Starting Urban Flow extraction to: {1}\r\n", DateTime.UtcNow.ToString("o"), targetDir));
+                }
+                catch { }
+
+                Assembly asm = Assembly.GetExecutingAssembly();
+                using (Stream zipStream = asm.GetManifestResourceStream("urban_flow_payload.zip"))
+                {
+                    if (zipStream == null)
+                    {
+                        throw new FileNotFoundException("Embedded installation payload 'urban_flow_payload.zip' not found in executable.");
+                    }
+
+                    using (ZipArchive archive = new ZipArchive(zipStream, ZipArchiveMode.Read))
+                    {
+                        int total = archive.Entries.Count;
+                        int count = 0;
+
+                        foreach (ZipArchiveEntry entry in archive.Entries)
+                        {
+                            count++;
+                            string fullDestPath;
+                            if (!IsSafeZipEntry(entry.FullName, targetDir, out fullDestPath))
+                            {
+                                continue;
+                            }
+
+                            if (string.IsNullOrEmpty(entry.Name))
+                            {
+                                if (!Directory.Exists(fullDestPath))
+                                    Directory.CreateDirectory(fullDestPath);
+                            }
+                            else
+                            {
+                                string dir = Path.GetDirectoryName(fullDestPath);
+                                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                                    Directory.CreateDirectory(dir);
+
+                                bool extracted = false;
+                                for (int attempt = 0; attempt < 3; attempt++)
+                                {
+                                    try
+                                    {
+                                        if (File.Exists(fullDestPath))
+                                        {
+                                            try { File.SetAttributes(fullDestPath, FileAttributes.Normal); } catch { }
+                                        }
+                                        entry.ExtractToFile(fullDestPath, true);
+                                        extracted = true;
+                                        break;
+                                    }
+                                    catch (IOException)
+                                    {
+                                        Thread.Sleep(150 * (attempt + 1));
+                                    }
+                                    catch (UnauthorizedAccessException)
+                                    {
+                                        Thread.Sleep(150 * (attempt + 1));
+                                    }
+                                }
+
+                                if (!extracted)
+                                {
+                                    try
+                                    {
+                                        string tmp = fullDestPath + ".tmp." + Guid.NewGuid().ToString("N");
+                                        entry.ExtractToFile(tmp, true);
+                                        if (File.Exists(fullDestPath))
+                                        {
+                                            try { File.Delete(fullDestPath); } catch { }
+                                        }
+                                        File.Move(tmp, fullDestPath);
+                                        extracted = true;
+                                    }
+                                    catch
+                                    {
+                                        if (File.Exists(fullDestPath))
+                                        {
+                                            try
+                                            {
+                                                FileInfo fi = new FileInfo(fullDestPath);
+                                                if (fi.Length == entry.Length)
+                                                    extracted = true;
+                                            }
+                                            catch { }
+                                        }
+                                    }
+                                }
+
+                                UnblockFile(fullDestPath);
+                            }
+
+                            if (count % 100 == 0 || count == total)
+                            {
+                                int pct = (int)((count * 95.0) / total);
+                                if (progress != null)
+                                    progress(pct, string.Format("Extracting components ({0}%)... {1}", pct, entry.Name));
+                            }
+                        }
+                    }
+                }
+
+                if (progress != null) progress(96, "Configuring system security permissions...");
+                UnblockDirectory(targetDir);
+
+                if (createShortcut)
+                {
+                    if (progress != null) progress(98, "Creating Desktop shortcut...");
+                    CreateShortcuts(targetDir);
+                }
+
+                try
+                {
+                    File.AppendAllText(logFile, string.Format("[{0}] Installation completed successfully.\r\n", DateTime.UtcNow.ToString("o")));
+                }
+                catch { }
+
+                if (progress != null) progress(100, "Installation completed successfully!");
+
+                if (launch)
+                {
+                    LaunchApp(targetDir);
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                try
+                {
+                    File.AppendAllText(logFile, string.Format("[{0}] ERROR: {1}\r\n{2}\r\n", DateTime.UtcNow.ToString("o"), ex.Message, ex.StackTrace));
+                }
+                catch { }
+                if (progress != null) progress(-1, "Installation error: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static void CreateShortcuts(string targetDir)
         {
             try
             {
                 string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
                 string shortcutPath = Path.Combine(desktopPath, "Urban Flow.lnk");
+                string exePath = Path.Combine(targetDir, "Urban Flow.exe");
                 string electronExe = Path.Combine(targetDir, "frontend", "node_modules", "electron", "dist", "electron.exe");
                 string frontendDir = Path.Combine(targetDir, "frontend");
                 string iconPath = Path.Combine(targetDir, "frontend", "public", "favicon.ico");
-                string exePath = Path.Combine(targetDir, "Urban Flow.exe");
 
                 IShellLinkW link = (IShellLinkW)new ShellLink();
                 link.SetDescription("Urban Flow - Adaptive Traffic Signal System");
 
-                if (File.Exists(electronExe))
+                if (File.Exists(exePath))
+                {
+                    link.SetPath(exePath);
+                    link.SetWorkingDirectory(targetDir);
+                    if (File.Exists(iconPath))
+                    {
+                        link.SetIconLocation(iconPath, 0);
+                    }
+                }
+                else if (File.Exists(electronExe))
                 {
                     link.SetPath(electronExe);
                     link.SetArguments("\"" + frontendDir + "\"");
-                }
-                else
-                {
-                    link.SetPath(exePath);
-                }
-
-                link.SetWorkingDirectory(targetDir);
-                if (File.Exists(iconPath))
-                {
-                    link.SetIconLocation(iconPath, 0);
+                    link.SetWorkingDirectory(targetDir);
+                    if (File.Exists(iconPath))
+                    {
+                        link.SetIconLocation(iconPath, 0);
+                    }
                 }
 
                 IPersistFile file = (IPersistFile)link;
@@ -507,7 +633,7 @@ namespace UrbanFlowSetup
             catch { }
         }
 
-        private void LaunchApp(string targetDir)
+        private static void LaunchApp(string targetDir)
         {
             try
             {
@@ -515,21 +641,21 @@ namespace UrbanFlowSetup
                 string electronExe = Path.Combine(targetDir, "frontend", "node_modules", "electron", "dist", "electron.exe");
                 string frontendDir = Path.Combine(targetDir, "frontend");
 
-                if (File.Exists(electronExe))
+                if (File.Exists(exePath))
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = exePath,
+                        WorkingDirectory = targetDir,
+                        UseShellExecute = true
+                    });
+                }
+                else if (File.Exists(electronExe))
                 {
                     Process.Start(new ProcessStartInfo
                     {
                         FileName = electronExe,
                         Arguments = "\"" + frontendDir + "\"",
-                        WorkingDirectory = targetDir,
-                        UseShellExecute = true
-                    });
-                }
-                else if (File.Exists(exePath))
-                {
-                    Process.Start(new ProcessStartInfo
-                    {
-                        FileName = exePath,
                         WorkingDirectory = targetDir,
                         UseShellExecute = true
                     });
@@ -543,7 +669,53 @@ namespace UrbanFlowSetup
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new SetupForm(args != null && args.Length > 0 ? args[0] : null));
+
+            string targetPath = null;
+            bool silent = false;
+            bool disableLaunch = false;
+
+            if (args != null)
+            {
+                foreach (string arg in args)
+                {
+                    if (string.Equals(arg, "/S", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(arg, "--silent", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(arg, "-s", StringComparison.OrdinalIgnoreCase))
+                    {
+                        silent = true;
+                    }
+                    else if (string.Equals(arg, "--no-launch", StringComparison.OrdinalIgnoreCase))
+                    {
+                        disableLaunch = true;
+                    }
+                    else if (!arg.StartsWith("-") && !arg.StartsWith("/"))
+                    {
+                        targetPath = arg;
+                    }
+                }
+            }
+
+            if (silent)
+            {
+                if (string.IsNullOrWhiteSpace(targetPath))
+                {
+                    targetPath = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        "Programs",
+                        "Urban Flow"
+                    );
+                }
+
+                bool ok = PerformInstallationCore(targetPath, true, !disableLaunch, (pct, status) =>
+                {
+                    try { Console.WriteLine(string.Format("[{0}%] {1}", pct, status)); } catch { }
+                });
+
+                Environment.Exit(ok ? 0 : 1);
+                return;
+            }
+
+            Application.Run(new SetupForm(targetPath));
         }
     }
 }

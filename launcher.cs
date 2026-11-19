@@ -171,13 +171,57 @@ namespace UrbanFlowLauncher
 
                     if (string.IsNullOrEmpty(electronExe) || !File.Exists(electronExe))
                     {
+                        // Search for Urban Flow Setup.exe in nearby locations
+                        string parentDir = null;
+                        try { parentDir = Directory.GetParent(appDir) != null ? Directory.GetParent(appDir).FullName : null; } catch { }
+
+                        string[] candidateInstallerPaths = new string[]
+                        {
+                            Path.Combine(appDir, "Urban Flow Setup.exe"),
+                            parentDir != null ? Path.Combine(parentDir, "Urban Flow Setup.exe") : "",
+                            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Urban Flow Setup.exe"),
+                            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads", "Urban Flow Setup.exe"),
+                        };
+
+                        string foundInstaller = null;
+                        foreach (string path in candidateInstallerPaths)
+                        {
+                            if (!string.IsNullOrEmpty(path) && File.Exists(path))
+                            {
+                                foundInstaller = path;
+                                break;
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(foundInstaller))
+                        {
+                            DialogResult result = MessageBox.Show(
+                                "Urban Flow is not yet installed on this computer.\n\n" +
+                                "Installer found:\n" + foundInstaller + "\n\n" +
+                                "Would you like to run the installer now to complete setup in 1 click?",
+                                "Urban Flow - Installation Required",
+                                MessageBoxButtons.YesNo,
+                                MessageBoxIcon.Information
+                            );
+
+                            if (result == DialogResult.Yes)
+                            {
+                                Process.Start(new ProcessStartInfo
+                                {
+                                    FileName = foundInstaller,
+                                    UseShellExecute = true
+                                });
+                            }
+                            return;
+                        }
+
                         MessageBox.Show(
-                            "Urban Flow application components are not yet installed.\n\n" +
-                            "Missing: " + Path.Combine(workingDir, "node_modules", "electron", "dist", "electron.exe") + "\n\n" +
-                            "Please run 'start.bat' or the Urban Flow installer to complete setup.",
-                            "Urban Flow - Component Not Found",
+                            "Urban Flow is not yet installed on this computer.\n\n" +
+                            "To install: Please run 'Urban Flow Setup.exe' (the ~580 MB standalone installer).\n\n" +
+                            "Note: 'Urban Flow.exe' is the application launcher and runs once setup is completed.",
+                            "Urban Flow Setup Required",
                             MessageBoxButtons.OK,
-                            MessageBoxIcon.Warning
+                            MessageBoxIcon.Information
                         );
                         return;
                     }

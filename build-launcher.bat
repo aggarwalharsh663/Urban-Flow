@@ -12,8 +12,8 @@ if not exist "%CSC_EXE%" (
     exit /b 1
 )
 
-echo Compiling Urban Flow.exe with metadata, icons, and UAC manifest...
-"%CSC_EXE%" /nologo /target:winexe /optimize+ /win32manifest:app.manifest /win32icon:frontend\public\favicon.ico /out:"Urban Flow.exe" launcher.cs
+echo Compiling Urban Flow.exe with metadata, icons, x64 architecture, and UAC manifest...
+"%CSC_EXE%" /nologo /target:winexe /platform:x64 /optimize+ /win32manifest:app.manifest /win32icon:frontend\public\favicon.ico /out:"Urban Flow.exe" launcher.cs
 if errorlevel 1 (
     echo [ERROR] Compilation failed.
     exit /b 1
