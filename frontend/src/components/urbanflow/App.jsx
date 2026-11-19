@@ -1226,6 +1226,7 @@ export default function App() {
   const [greenBudget, setGreenBudget] = useState(120);
   const [health, setHealth] = useState(null);
   const [theme, setTheme] = useState("dark");
+  const [hasMounted, setHasMounted] = useState(false);
   const [activeNav, setActiveNav] = useState("dashboard");
 
   // Scroll spy to automatically update active navigation based on scroll position / visible section
@@ -1285,14 +1286,48 @@ export default function App() {
     };
   }, []);
 
+  // Hydration-safe theme initialization and synchronization (Issue #6)
   useEffect(() => {
-    const saved = localStorage.getItem("urban-flow-theme");
-    if (saved) setTheme(saved);
+    setHasMounted(true);
+    try {
+      const saved = localStorage.getItem("urban-flow-theme");
+      if (saved === "light" || saved === "dark") {
+        setTheme(saved);
+        if (typeof document !== "undefined") {
+          document.documentElement.dataset.theme = saved;
+        }
+      } else {
+        if (typeof document !== "undefined") {
+          document.documentElement.dataset.theme = "dark";
+        }
+      }
+    } catch (e) {
+      if (typeof document !== "undefined") {
+        document.documentElement.dataset.theme = "dark";
+      }
+    }
   }, []);
+
+  const handleToggleTheme = () => {
+    setTheme((current) => {
+      const nextTheme = current === "dark" ? "light" : "dark";
+      try {
+        localStorage.setItem("urban-flow-theme", nextTheme);
+      } catch (e) {}
+      if (typeof document !== "undefined") {
+        document.documentElement.dataset.theme = nextTheme;
+      }
+      return nextTheme;
+    });
+  };
+
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    localStorage.setItem("urban-flow-theme", theme);
-  }, [theme]);
+    if (!hasMounted) return;
+    try {
+      document.documentElement.dataset.theme = theme;
+      localStorage.setItem("urban-flow-theme", theme);
+    } catch (e) {}
+  }, [theme, hasMounted]);
   useEffect(() => {
     let active = true;
     const checkHealth = () => {
@@ -1342,7 +1377,7 @@ export default function App() {
       }
     }, 120);
   };
-  return <div id="top" className="app-shell" data-theme={theme}><Header health={health} theme={theme} onToggleTheme={() => setTheme((current) => current === "dark" ? "light" : "dark")} activeNav={activeNav} onNavClick={setActiveNav} />
+  return <div id="top" className="app-shell" data-theme={theme}><Header health={health} theme={theme} onToggleTheme={handleToggleTheme} activeNav={activeNav} onNavClick={setActiveNav} />
     {health?.apiAvailable === false && <div className="setup-notice" role="status"><Info size={17} /><div><strong>Backend is not running</strong><p>Open PowerShell in the project folder and run <code>.\start-local.ps1</code>. This starts the API and website.</p></div><button type="button" onClick={() => window.location.reload()} aria-label="Retry backend connection"><RotateCcw size={15} />Retry</button></div>}
     {health?.authRequired && <div className="setup-notice setup-notice-warning" role="alert"><Info size={17} /><div><strong>Authentication required</strong><p>Check local dev token configuration. Run <code>start.bat</code> to launch with the authenticated local dev proxy, or verify backend authentication.</p></div></div>}
     {health?.apiAvailable && (!health.computerVisionReady || !health.modelAvailable) && <div className="setup-notice setup-notice-warning" role="status"><Info size={17} /><div><strong>{!health.computerVisionReady ? "Image/video analysis needs setup" : "Local YOLO model is missing"}</strong><p>{!health.computerVisionReady ? `Missing packages: ${health.missingDependencies.join(", ") || "OpenCV and Ultralytics"}. Run .\\backend\\setup.ps1, then restart the backend.` : "Download yolov8n.pt into backend\\, then restart the backend. Simulated counts are ready now."}</p></div></div>}
