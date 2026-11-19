@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { parseErrorMessage } from "../../lib/error-parser";
 import {
   AlertTriangle, ArrowDown, ArrowDownLeft, ArrowUp, ArrowUpRight, BarChart3,
   CarFront, ChevronRight, CircleHelp, Clock3, Download, FileImage,
@@ -35,8 +36,10 @@ async function request(url, options = {}) {
   const response = await fetch(fullUrl, { ...options, headers });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(body.detail || "The request could not be completed.");
+    const message = parseErrorMessage(body, response.status, "The request could not be completed.");
+    const error = new Error(message);
     error.status = response.status;
+    error.body = body;
     throw error;
   }
   return body;
@@ -312,7 +315,7 @@ function UploadAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetCha
       const endpoint = file.type.startsWith("video/") || file.name.toLowerCase().endsWith(".mp4") ? "/api/analyse-video" : "/api/analyse-image";
       const report = await request(endpoint, { method: "POST", body: form });
       onReport(report);
-    } catch (exception) { setError(exception.message); }
+    } catch (exception) { setError(parseErrorMessage(exception, exception.status, "Traffic analysis failed.")); }
     finally { setBusy(false); }
   };
   const reset = () => { setFile(null); setPreview(""); setError(""); if (inputRef.current) inputRef.current.value = ""; };
@@ -375,7 +378,7 @@ function Simulation({ onReport, junctionName, greenBudget = 120, onBudgetChange 
   const simulate = async () => {
     setBusy(true); setError("");
     try { const report = await request("/api/simulate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ junction_name: (junctionName || "Demo Junction").slice(0, 100), counts, green_budget: greenBudget }) }); onReport(report); }
-    catch (exception) { setError(exception.message); }
+    catch (exception) { setError(parseErrorMessage(exception, exception.status, "Simulation failed.")); }
     finally { setBusy(false); }
   };
   return (
@@ -528,7 +531,7 @@ function MultiVideoAnalysis({ onReport, junctionName, greenBudget = 120, onBudge
       });
       onReport(report);
     } catch (err) {
-      setError(err.message || "Failed to process directional videos.");
+      setError(parseErrorMessage(err, err.status, "Failed to process directional videos."));
     } finally {
       setBusy(false);
     }

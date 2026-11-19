@@ -248,6 +248,89 @@ const ACTION_SCOPES = {
   'cancel': 'admin',
 };
 
+// --- Canonical Error Response Helper (Issue #7) ---
+function sanitizeErrorMessage(msg) {
+  if (!msg) return 'The request could not be completed.';
+  if (typeof msg !== 'string') {
+    if (typeof msg === 'object' && msg !== null) {
+      if (typeof msg.error === 'string' && msg.error.trim()) {
+        msg = msg.error;
+      } else if (typeof msg.detail === 'string' && msg.detail.trim()) {
+        msg = msg.detail;
+      } else if (typeof msg.message === 'string' && msg.message.trim()) {
+        msg = msg.message;
+      } else {
+        try {
+          msg = JSON.stringify(msg);
+        } catch {
+          msg = 'An unexpected error occurred.';
+        }
+      }
+    } else {
+      msg = String(msg);
+    }
+  }
+
+  let clean = msg.trim();
+
+  // Strip stack trace lines and keep only the primary error description line
+  if (clean.includes('\n') || clean.includes('\r')) {
+    clean = clean.split(/\r?\n/)[0].trim();
+  }
+  clean = clean.replace(/^Error:\s*/i, '').trim();
+
+  // Strip control characters
+  clean = clean.replace(/[\x00-\x08\x0b-\x1f]/g, '').trim();
+  if (!clean || clean === '[object Object]') return 'The request could not be completed.';
+
+  // Redact session secrets and tokens
+  if (typeof IPC_SESSION_TOKEN !== 'undefined' && IPC_SESSION_TOKEN && clean.includes(IPC_SESSION_TOKEN)) {
+    clean = clean.replaceAll(IPC_SESSION_TOKEN, '[REDACTED_TOKEN]');
+  }
+
+  // Redact local Windows absolute paths (e.g. C:\Users\... -> file.ext)
+  clean = clean.replace(/[a-zA-Z]:\\(?:[^"'\s\n\r<>]+\\)+[^"'\s\n\r<>]*/g, (matched) => {
+    return path.basename(matched) || '[path]';
+  });
+
+  // Redact POSIX system absolute paths (e.g. /home/..., /Users/... -> file.ext), preserving API routes like /api/...
+  clean = clean.replace(/\/(?:home|Users|usr|var|tmp|etc|opt|root|proc)(?:\/[a-zA-Z0-9_.-]+)+/gi, (matched) => {
+    return path.basename(matched) || '[path]';
+  });
+
+  return clean || 'The request could not be completed.';
+}
+
+function mapExceptionToStatus(err) {
+  if (!err) return 500;
+  const msg = (err.message || String(err)).toLowerCase();
+  if (msg.includes('timed out') || msg.includes('timeout')) return 504;
+  if (msg.includes('not running') || msg.includes('terminated') || msg.includes('unavailable') || msg.includes('initializing')) return 503;
+  if (msg.includes('unauthorized') || msg.includes('invalid token') || msg.includes('missing token') || msg.includes('invalid ipc token')) return 401;
+  if (msg.includes('forbidden') || msg.includes('insufficient scope') || msg.includes('unauthorized ipc sender') || msg.includes('unauthorized host')) return 403;
+  if (msg.includes('not found') || msg.includes('unknown action') || msg.includes('unknown route')) return 404;
+  if (msg.includes('exceeds') || msg.includes('too large') || msg.includes('payload exceeds')) return 413;
+  if (msg.includes('rate limit') || msg.includes('too many requests')) return 429;
+  if (msg.includes('cancelled') || msg.includes('canceled')) return 499;
+  if (msg.includes('invalid') || msg.includes('unsupported') || msg.includes('malformed') || msg.includes('empty') || msg.includes('cannot be')) return 400;
+  return 500;
+}
+
+function createErrorResponse(message, status = 400, extraHeaders = {}) {
+  const safeMessage = sanitizeErrorMessage(message);
+  const payload = {
+    ok: false,
+    error: safeMessage,
+    detail: safeMessage,
+  };
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: applySecurityHeaders(Object.assign({
+      'content-type': 'application/json; charset=utf-8',
+    }, extraHeaders)),
+  });
+}
+
 function startPythonWorker() {
   log('Spawning portless Python worker:', PYTHON_EXE, WORKER_SCRIPT);
 
@@ -415,116 +498,164 @@ function registerProtocolHandler() {
       const parsedUrl = new URL(req.url);
       if (parsedUrl.hostname !== 'urbanflow') {
         log('Rejected unauthorized app host:', parsedUrl.hostname);
-        return new Response('Forbidden Host', {
-          status: 403,
-          headers: applySecurityHeaders({ 'content-type': 'text/plain' }),
-        });
+        return createErrorResponse('Forbidden Host: unauthorized host origin.', 403);
       }
       let rawPathname = parsedUrl.pathname;
       log(`[app://] ${req.method} ${rawPathname}`);
 
       // 1. API: /api/health
       if (rawPathname === '/api/health') {
-        const result = await sendIpcRequest('health', {}, 30000, 'read');
-        return new Response(JSON.stringify(result), {
-          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-        });
+        try {
+          const result = await sendIpcRequest('health', {}, 30000, 'read');
+          return new Response(JSON.stringify(result), {
+            headers: applySecurityHeaders({ 'content-type': 'application/json; charset=utf-8' }),
+          });
+        } catch (err) {
+          return createErrorResponse(err.message || 'Failed to check system health.', mapExceptionToStatus(err));
+        }
       }
 
       // 1a. API: /api/copyright
       if (rawPathname === '/api/copyright') {
-        const result = await sendIpcRequest('copyright', {}, 30000, 'read');
-        return new Response(JSON.stringify(result), {
-          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-        });
+        try {
+          const result = await sendIpcRequest('copyright', {}, 30000, 'read');
+          return new Response(JSON.stringify(result), {
+            headers: applySecurityHeaders({ 'content-type': 'application/json; charset=utf-8' }),
+          });
+        } catch (err) {
+          return createErrorResponse(err.message || 'Failed to verify copyright status.', mapExceptionToStatus(err));
+        }
       }
 
       // 1b. API: /api/directions
       if (rawPathname === '/api/directions') {
-        const result = await sendIpcRequest('directions', {}, 30000, 'read');
-        return new Response(JSON.stringify(result), {
-          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-        });
+        try {
+          const result = await sendIpcRequest('directions', {}, 30000, 'read');
+          return new Response(JSON.stringify(result), {
+            headers: applySecurityHeaders({ 'content-type': 'application/json; charset=utf-8' }),
+          });
+        } catch (err) {
+          return createErrorResponse(err.message || 'Failed to retrieve approach directions.', mapExceptionToStatus(err));
+        }
       }
 
       // 2. API: /api/simulate
       if (rawPathname === '/api/simulate' && req.method === 'POST') {
-        const body = await req.json().catch(() => ({}));
-        const result = await sendIpcRequest('simulate', body, 30000, 'reports:write');
-        return new Response(JSON.stringify(result), {
-          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-        });
+        let body;
+        try {
+          body = await req.json();
+        } catch {
+          return createErrorResponse('Malformed JSON in request body.', 400);
+        }
+        try {
+          const result = await sendIpcRequest('simulate', body || {}, 30000, 'reports:write');
+          return new Response(JSON.stringify(result), {
+            headers: applySecurityHeaders({ 'content-type': 'application/json; charset=utf-8' }),
+          });
+        } catch (err) {
+          return createErrorResponse(err.message || 'Simulation execution failed.', mapExceptionToStatus(err));
+        }
       }
 
       // 3. API: /api/calculate-signal-plan
       if (rawPathname === '/api/calculate-signal-plan' && req.method === 'POST') {
-        const body = await req.json().catch(() => ({}));
-        const result = await sendIpcRequest('calculate-signal-plan', body, 30000, 'reports:write');
-        return new Response(JSON.stringify(result), {
-          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-        });
+        let body;
+        try {
+          body = await req.json();
+        } catch {
+          return createErrorResponse('Malformed JSON in request body.', 400);
+        }
+        try {
+          const result = await sendIpcRequest('calculate-signal-plan', body || {}, 30000, 'reports:write');
+          return new Response(JSON.stringify(result), {
+            headers: applySecurityHeaders({ 'content-type': 'application/json; charset=utf-8' }),
+          });
+        } catch (err) {
+          return createErrorResponse(err.message || 'Signal plan calculation failed.', mapExceptionToStatus(err));
+        }
       }
 
       // 4. API: /api/reports/:id
       const reportMatch = rawPathname.match(/^\/api\/reports\/([a-zA-Z0-9]+)$/);
       if (reportMatch) {
         const reportId = reportMatch[1];
-        const result = await sendIpcRequest('get-report', { report_id: reportId }, 30000, 'read');
-        return new Response(JSON.stringify(result), {
-          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-        });
+        if (!reportId || reportId.trim().length === 0) {
+          return createErrorResponse('Missing required parameter: report_id.', 400);
+        }
+        try {
+          const result = await sendIpcRequest('get-report', { report_id: reportId }, 30000, 'read');
+          return new Response(JSON.stringify(result), {
+            headers: applySecurityHeaders({ 'content-type': 'application/json; charset=utf-8' }),
+          });
+        } catch (err) {
+          return createErrorResponse(err.message || 'Failed to retrieve signal plan report.', mapExceptionToStatus(err));
+        }
       }
 
       // 5. API: /api/reports/:id/cycle
       const cycleMatch = rawPathname.match(/^\/api\/reports\/([a-zA-Z0-9]+)\/cycle$/);
       if (cycleMatch && req.method === 'PUT') {
         const reportId = cycleMatch[1];
-        const body = await req.json().catch(() => ({}));
-        const result = await sendIpcRequest('update-cycle', { report_id: reportId, ...body }, 30000, 'reports:write');
-        return new Response(JSON.stringify(result), {
-          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-        });
+        let body;
+        try {
+          body = await req.json();
+        } catch {
+          return createErrorResponse('Malformed JSON in request body.', 400);
+        }
+        try {
+          const result = await sendIpcRequest('update-cycle', { report_id: reportId, ...(body || {}) }, 30000, 'reports:write');
+          return new Response(JSON.stringify(result), {
+            headers: applySecurityHeaders({ 'content-type': 'application/json; charset=utf-8' }),
+          });
+        } catch (err) {
+          return createErrorResponse(err.message || 'Failed to update cycle timing budget.', mapExceptionToStatus(err));
+        }
       }
 
       // 6. API: /api/reports/:id/counts
       const countsMatch = rawPathname.match(/^\/api\/reports\/([a-zA-Z0-9]+)\/counts$/);
       if (countsMatch && req.method === 'PUT') {
         const reportId = countsMatch[1];
-        const body = await req.json().catch(() => ({}));
-        const result = await sendIpcRequest('update-counts', { report_id: reportId, ...body }, 30000, 'reports:write');
-        return new Response(JSON.stringify(result), {
-          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-        });
+        let body;
+        try {
+          body = await req.json();
+        } catch {
+          return createErrorResponse('Malformed JSON in request body.', 400);
+        }
+        try {
+          const result = await sendIpcRequest('update-counts', { report_id: reportId, ...(body || {}) }, 30000, 'reports:write');
+          return new Response(JSON.stringify(result), {
+            headers: applySecurityHeaders({ 'content-type': 'application/json; charset=utf-8' }),
+          });
+        } catch (err) {
+          return createErrorResponse(err.message || 'Failed to update vehicle counts.', mapExceptionToStatus(err));
+        }
       }
 
       // 7. API: /api/analyse-image and /api/analyse-video (multipart/form-data upload)
       if (rawPathname === '/api/analyse-image' || rawPathname === '/api/analyse-video') {
         const isVideo = rawPathname === '/api/analyse-video';
-        const formData = await req.formData();
+        let formData;
+        try {
+          formData = await req.formData();
+        } catch {
+          return createErrorResponse('Malformed multipart form-data in upload request.', 400);
+        }
         const file = formData.get('file');
-        if (!file) {
-          return new Response(JSON.stringify({ detail: 'No file uploaded.' }), {
-            status: 400,
-            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-          });
+        if (!file || typeof file === 'string') {
+          return createErrorResponse('No file uploaded.', 400);
         }
 
         // Enforce 100 MB max size before reading into memory (Finding 4, 12)
         if (file.size > MAX_UPLOAD_SIZE) {
-          return new Response(JSON.stringify({ detail: 'Upload exceeds 100 MB limit.' }), {
-            status: 413,
-            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-          });
+          return createErrorResponse('Upload exceeds 100 MB limit.', 413);
         }
 
         // Strict extension validation
         const ext = path.extname(file.name || '').toLowerCase();
         const expectedExts = isVideo ? new Set(['.mp4']) : new Set(['.jpg', '.jpeg', '.png']);
         if (!expectedExts.has(ext)) {
-          return new Response(JSON.stringify({ detail: `Unsupported file type '${ext}'. Allowed: ${Array.from(expectedExts).join(', ')}` }), {
-            status: 400,
-            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-          });
+          return createErrorResponse(`Unsupported file type '${ext}'. Allowed: ${Array.from(expectedExts).join(', ')}`, 400);
         }
 
         const tempName = `${crypto.randomUUID()}${ext}`;
@@ -565,15 +696,9 @@ function registerProtocolHandler() {
         if (streamFailed || !headerChunk || !verifyMagicBytes(headerChunk, ext)) {
           try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch (e) {}
           if (totalBytes > MAX_UPLOAD_SIZE) {
-            return new Response(JSON.stringify({ detail: 'Upload exceeds 100 MB limit.' }), {
-              status: 413,
-              headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-            });
+            return createErrorResponse('Upload exceeds 100 MB limit.', 413);
           }
-          return new Response(JSON.stringify({ detail: `File content does not match expected format for ${ext}.` }), {
-            status: 400,
-            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-          });
+          return createErrorResponse(`File content does not match expected format for ${ext}.`, 400);
         }
 
         try {
@@ -587,19 +712,24 @@ function registerProtocolHandler() {
           }, isVideo ? 60000 : 30000, 'inference:write');
 
           return new Response(JSON.stringify(result), {
-            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+            headers: applySecurityHeaders({ 'content-type': 'application/json; charset=utf-8' }),
           });
         } catch (ipcErr) {
           // Clean up temp file on failure
           try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch (e) {}
-          throw ipcErr;
+          return createErrorResponse(ipcErr.message || 'Analysis processing failed.', mapExceptionToStatus(ipcErr));
         }
       }
 
       // 7b. API: /api/analyse-multi-video (directional 4-video upload)
       if (rawPathname === '/api/analyse-multi-video') {
         const MAX_VIDEO_UPLOAD_SIZE = 150 * 1024 * 1024; // 150 MB per video upload
-        const formData = await req.formData();
+        let formData;
+        try {
+          formData = await req.formData();
+        } catch {
+          return createErrorResponse('Malformed multipart form-data in upload request.', 400);
+        }
         const directions = ['north', 'south', 'east', 'west'];
         const savedPaths = {};
         const createdFiles = [];
@@ -610,19 +740,13 @@ function registerProtocolHandler() {
             if (!file || typeof file === 'string' || !file.name) continue;
 
             if (file.size > MAX_VIDEO_UPLOAD_SIZE) {
-              return new Response(JSON.stringify({ detail: `Video for ${dir} exceeds 150 MB limit.` }), {
-                status: 413,
-                headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-              });
+              return createErrorResponse(`Video for ${dir} exceeds 150 MB limit.`, 413);
             }
 
             const ext = path.extname(file.name || '').toLowerCase();
             const allowedExts = new Set(['.mp4', '.avi']);
             if (!allowedExts.has(ext)) {
-              return new Response(JSON.stringify({ detail: `Unsupported video format '${ext}' for ${dir}. Allowed: .mp4, .avi` }), {
-                status: 400,
-                headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-              });
+              return createErrorResponse(`Unsupported video format '${ext}' for ${dir}. Allowed: .mp4, .avi`, 400);
             }
 
             const tempName = `${crypto.randomUUID()}${ext}`;
@@ -663,15 +787,9 @@ function registerProtocolHandler() {
             if (streamFailed || !headerChunk || !verifyMagicBytes(headerChunk, ext)) {
               try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch (e) {}
               if (totalBytes > MAX_VIDEO_UPLOAD_SIZE) {
-                return new Response(JSON.stringify({ detail: `Video for ${dir} exceeds 150 MB limit.` }), {
-                  status: 413,
-                  headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-                });
+                return createErrorResponse(`Video for ${dir} exceeds 150 MB limit.`, 413);
               }
-              return new Response(JSON.stringify({ detail: `File content for ${dir} does not match expected format for ${ext}.` }), {
-                status: 400,
-                headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-              });
+              return createErrorResponse(`File content for ${dir} does not match expected format for ${ext}.`, 400);
             }
 
             savedPaths[dir] = tempPath;
@@ -679,10 +797,7 @@ function registerProtocolHandler() {
           }
 
           if (Object.keys(savedPaths).length === 0) {
-            return new Response(JSON.stringify({ detail: 'At least one directional video must be uploaded.' }), {
-              status: 400,
-              headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-            });
+            return createErrorResponse('At least one directional video must be uploaded.', 400);
           }
 
           const result = await sendIpcRequest('analyse-multi-video', {
@@ -695,17 +810,19 @@ function registerProtocolHandler() {
           }, 180000, 'inference:write');
 
           return new Response(JSON.stringify(result), {
-            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+            headers: applySecurityHeaders({ 'content-type': 'application/json; charset=utf-8' }),
           });
         } catch (ipcErr) {
           for (const f of createdFiles) {
             try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
           }
-          return new Response(JSON.stringify({ detail: ipcErr.message || 'Multi-video analysis failed.' }), {
-            status: 400,
-            headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-          });
+          return createErrorResponse(ipcErr.message || 'Multi-video analysis failed.', mapExceptionToStatus(ipcErr));
         }
+      }
+
+      // Catch-all for undefined /api routes (Requirement 4 & Test 11)
+      if (rawPathname.startsWith('/api/')) {
+        return createErrorResponse(`API route not found: ${req.method} ${rawPathname}`, 404);
       }
 
       // 8. Static uploaded media files (/uploads/...) with traversal & XSS protection (Finding 2 & 4)
@@ -771,10 +888,7 @@ function registerProtocolHandler() {
       });
     } catch (err) {
       log('[Protocol Error]', err);
-      return new Response(JSON.stringify({ detail: err.message || 'Internal Error' }), {
-        status: 500,
-        headers: applySecurityHeaders({ 'content-type': 'application/json' }),
-      });
+      return createErrorResponse(err.message || 'Internal Server Error', mapExceptionToStatus(err));
     }
   });
 }
@@ -1058,3 +1172,16 @@ app.on('window-all-closed', () => {
     app.quit();
   }
 });
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    sanitizeErrorMessage,
+    mapExceptionToStatus,
+    createErrorResponse,
+    applySecurityHeaders,
+    isAllowedOrigin,
+    resolveContainedPath,
+    verifyMagicBytes,
+    sendIpcRequest,
+  };
+}

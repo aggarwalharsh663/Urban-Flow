@@ -24,7 +24,9 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -118,18 +120,42 @@ app = FastAPI(
 )
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = exc.errors()
+    readable_errors = []
+    for err in errors:
+        loc = " -> ".join(str(l) for l in err.get("loc", []) if l != "body")
+        msg = err.get("msg", "Invalid value")
+        readable_errors.append(f"{loc}: {msg}" if loc else msg)
+    safe_error_str = "; ".join(readable_errors) or "Request validation failed."
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"ok": False, "error": safe_error_str, "detail": safe_error_str},
+    )
+
+
+@app.exception_handler(HTTPException)
+@app.exception_handler(StarletteHTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException | StarletteHTTPException):
+    detail_msg = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"ok": False, "error": detail_msg, "detail": exc.detail},
+        headers=getattr(exc, "headers", None) or {},
+    )
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    if isinstance(exc, HTTPException):
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"detail": exc.detail},
-            headers=getattr(exc, "headers", None) or {},
-        )
     LOGGER.exception("Unhandled server exception on %s %s: %s", request.method, request.url.path, exc)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content={"detail": "An internal server error occurred. Please check server logs."},
+        content={
+            "ok": False,
+            "error": "An internal server error occurred. Please check server logs.",
+            "detail": "An internal server error occurred. Please check server logs.",
+        },
     )
 
 # 1. CORS Configuration (Finding 1: Explicit origins only, NO wildcard)

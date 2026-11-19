@@ -761,7 +761,7 @@ def process_ipc_request(req: dict) -> dict:
     authorized, auth_err = verify_ipc_auth(req)
     if not authorized:
         LOGGER.warning("IPC request rejected: action=%s, reason=%s", action, auth_err)
-        return {"id": req_id, "ok": False, "error": auth_err}
+        return {"id": req_id, "ok": False, "error": auth_err, "detail": auth_err}
 
     if pop_cancelled_request(req_id):
         LOGGER.info("Skipping execution of pre-cancelled request: %s", req_id)
@@ -769,7 +769,8 @@ def process_ipc_request(req: dict) -> dict:
 
     handler = HANDLERS.get(action)
     if not handler:
-        return {"id": req_id, "ok": False, "error": f"Unknown action: {action}"}
+        unknown_err = f"Unknown action: {action}"
+        return {"id": req_id, "ok": False, "error": unknown_err, "detail": unknown_err}
 
     try:
         if action in {"analyse-image", "analyse-video", "analyse-multi-video"}:
@@ -786,7 +787,7 @@ def process_ipc_request(req: dict) -> dict:
         LOGGER.exception("Error processing request: %s", e)
         err_msg = str(e)
         err_msg = os.path.basename(err_msg) if ("\\" in err_msg or "/" in err_msg) else err_msg
-        return {"id": req_id, "ok": False, "error": err_msg}
+        return {"id": req_id, "ok": False, "error": err_msg, "detail": err_msg}
 
 
 def main():
@@ -816,7 +817,8 @@ def main():
                         is_auth, err_msg = verify_ipc_auth(req)
                         if not is_auth:
                             if req.get("id"):
-                                print(json.dumps({"id": req.get("id"), "ok": False, "error": err_msg or "Unauthorized: invalid IPC token or insufficient scope"}), flush=True)
+                                auth_fail_msg = err_msg or "Unauthorized: invalid IPC token or insufficient scope"
+                                print(json.dumps({"id": req.get("id"), "ok": False, "error": auth_fail_msg, "detail": auth_fail_msg}), flush=True)
                             continue
                         handle_cancel(req.get("data") or {})
                         if req.get("id"):
