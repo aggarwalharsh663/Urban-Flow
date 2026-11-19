@@ -128,7 +128,10 @@ def main():
 
     print("=== [3/4] Signing and unblocking output executable ===")
     sign_script = f"""
-    $cert = Get-ChildItem Cert:\\CurrentUser\\My | Where-Object {{ $_.Subject -like '*Urban Flow*' }} | Select-Object -First 1
+    $cert = Get-ChildItem Cert:\\CurrentUser\\My | Where-Object {{ $_.Subject -like '*Harsh Aggarwal*' }} | Select-Object -First 1
+    if (-not $cert) {{
+        $cert = Get-ChildItem Cert:\\CurrentUser\\My | Where-Object {{ $_.Subject -like '*Urban Flow*' }} | Select-Object -First 1
+    }}
     if ($cert) {{
         Set-AuthenticodeSignature -FilePath '{OUT_EXE}' -Certificate $cert | Out-Null
         Write-Host "Authenticode signed with: $($cert.Thumbprint)"
