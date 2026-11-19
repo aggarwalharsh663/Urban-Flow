@@ -38,6 +38,7 @@ try:
         _available_model_path,
         _get_model,
         _is_duplicate_or_enclosed,
+        get_inference_lock,
         set_inference_priority,
     )
 except ImportError:
@@ -55,6 +56,7 @@ except ImportError:
         _available_model_path,
         _get_model,
         _is_duplicate_or_enclosed,
+        get_inference_lock,
         set_inference_priority,
     )
 
@@ -577,14 +579,15 @@ def analyse_directional_video_clip(
             if cancellation_check and cancellation_check():
                 raise RuntimeError(f"Video processing cancelled during {norm_dir} analysis.")
             b_frames = sampled_frames[b_start : b_start + batch_size]
-            res_chunk = model.predict(
-                b_frames,
-                verbose=False,
-                classes=DETECTION_CLASS_IDS,
-                conf=0.18,
-                imgsz=640,
-                batch=len(b_frames),
-            )
+            with get_inference_lock():
+                res_chunk = model.predict(
+                    b_frames,
+                    verbose=False,
+                    classes=DETECTION_CLASS_IDS,
+                    conf=0.18,
+                    imgsz=640,
+                    batch=len(b_frames),
+                )
             all_res.extend(res_chunk)
 
     representative_frame = sampled_frames[rep_frame_idx].copy()

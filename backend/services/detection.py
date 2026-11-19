@@ -55,8 +55,46 @@ DIRECTION_COLORS_BGR = {
 
 _model = None
 _model_lock = threading.RLock()
+_inference_lock = threading.RLock()
 _model_warmed_up = False
 _warmup_thread: threading.Thread | None = None
+
+
+def get_inference_lock() -> threading.RLock:
+    """
+    Return the global model inference lock.
+    Serializes forward-pass execution across concurrent threads to prevent
+    YOLO predictor state corruption (Issue #2).
+    """
+    return _inference_lock
+
+
+class ThreadSafeYOLO:
+    """
+    Thread-safe synchronization wrapper around an Ultralytics YOLO model instance.
+    Guarantees serialized access to model.predict() and model.__call__() across
+    concurrent multi-video analysis threads, preventing internal state collisions
+    in YOLO's BasePredictor while allowing safe preprocessing/postprocessing outside the lock.
+    """
+
+    def __init__(self, raw_model, lock: threading.RLock | None = None):
+        self._raw_model = raw_model
+        self._lock = lock if lock is not None else _inference_lock
+
+    @property
+    def lock(self) -> threading.RLock:
+        return self._lock
+
+    def predict(self, *args, **kwargs):
+        with self._lock:
+            return self._raw_model.predict(*args, **kwargs)
+
+    def __call__(self, *args, **kwargs):
+        with self._lock:
+            return self._raw_model(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._raw_model, name)
 
 
 class ModelUnavailableError(RuntimeError):
@@ -111,6 +149,8 @@ def _get_model():
     global _model
     with _model_lock:
         if _model is not None:
+            if not isinstance(_model, ThreadSafeYOLO):
+                _model = ThreadSafeYOLO(_model, _inference_lock)
             return _model
         status = get_detection_status()
         if status["missing_dependencies"]:
@@ -134,7 +174,8 @@ def _get_model():
         set_inference_priority()
         from ultralytics import YOLO
 
-        _model = YOLO(str(model_path))
+        raw_model = YOLO(str(model_path))
+        _model = ThreadSafeYOLO(raw_model, _inference_lock)
         return _model
 
 
