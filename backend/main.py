@@ -466,6 +466,8 @@ def health(
     if not token or not verify_api_token(token):
         return {
             "app": "urban_flow",
+            "author": "Harsh Aggarwal",
+            "copyright": "Copyright (c) 2026 Harsh Aggarwal. All rights reserved.",
             "status": "ok",
             "privacy_mode": "local_default",
             "storage": "local",
@@ -475,6 +477,8 @@ def health(
     gem = get_gemini_status()
     return {
         "app": "urban_flow",
+        "author": "Harsh Aggarwal",
+        "copyright": "Copyright (c) 2026 Harsh Aggarwal. All rights reserved.",
         "status": "ok",
         "computer_vision_ready": det["computer_vision_ready"],
         "missing_dependencies": det.get("missing_dependencies", []),
@@ -483,6 +487,18 @@ def health(
         "gemini_available": gem["gemini_available"],
         "privacy_mode": "local_default",
         "storage": GLOBAL_STORAGE_MANAGER.get_status(),
+    }
+
+
+@app.get("/api/copyright")
+def get_copyright_info() -> dict:
+    return {
+        "project": "Urban Flow",
+        "author": "Harsh Aggarwal",
+        "email": "aggarwalharsh663@gmail.com",
+        "copyright": "Copyright (c) 2026 Harsh Aggarwal. All rights reserved.",
+        "license": "Urban Flow Proprietary License - Irrevocable Contributor IP Assignment",
+        "terms": "All additions, modifications, or contributed files automatically vest sole copyright in Harsh Aggarwal.",
     }
 
 

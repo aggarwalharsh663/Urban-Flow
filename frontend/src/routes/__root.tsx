@@ -79,6 +79,8 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "UrbanFlow" },
+      { name: "author", content: "Harsh Aggarwal" },
+      { name: "copyright", content: "Copyright (c) 2026 Harsh Aggarwal. All rights reserved." },
       { name: "theme-color", content: "#07111f" },
       { name: "description", content: "Adaptive traffic signal timing prototype." },
       { property: "og:title", content: "UrbanFlow" },

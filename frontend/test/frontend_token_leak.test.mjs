@@ -1,3 +1,12 @@
+/*
+ * Urban Flow - Adaptive Traffic Signal System
+ * Copyright (c) 2026 Harsh Aggarwal <aggarwalharsh663@gmail.com>. All rights reserved.
+ *
+ * Original Author & Sole Intellectual Property Owner: Harsh Aggarwal
+ * Any additions, modifications, or contributed files to this project automatically
+ * and irrevocably vest all copyright and intellectual property rights solely in Harsh Aggarwal.
+ */
+
 // Automated Test: Verify URBAN_FLOW_DEV_TOKEN is never leaked into client bundles or served JS
 import assert from 'node:assert/strict';
 import http from 'node:http';

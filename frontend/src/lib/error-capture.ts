@@ -1,3 +1,12 @@
+/*
+ * Urban Flow - Adaptive Traffic Signal System
+ * Copyright (c) 2026 Harsh Aggarwal <aggarwalharsh663@gmail.com>. All rights reserved.
+ *
+ * Original Author & Sole Intellectual Property Owner: Harsh Aggarwal
+ * Any additions, modifications, or contributed files to this project automatically
+ * and irrevocably vest all copyright and intellectual property rights solely in Harsh Aggarwal.
+ */
+
 // Captures the original Error out-of-band so server.ts can recover the stack
 // when h3 has already swallowed the throw into a generic 500 Response.
 

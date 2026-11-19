@@ -41,6 +41,13 @@ let isQuitting = false;
 app.name = 'Urban Flow';
 try {
   app.setAppUserModelId('Urban Flow');
+  app.setAboutPanelOptions({
+    applicationName: 'Urban Flow',
+    applicationVersion: '1.0.0',
+    copyright: 'Copyright © 2026 Harsh Aggarwal. All rights reserved.',
+    authors: ['Harsh Aggarwal <aggarwalharsh663@gmail.com>'],
+    website: 'https://github.com/aggarwalharsh663/Urban-Flow',
+  });
 } catch (e) {}
 
 const gotTheLock = app.requestSingleInstanceLock();
@@ -417,6 +424,14 @@ function registerProtocolHandler() {
       // 1. API: /api/health
       if (rawPathname === '/api/health') {
         const result = await sendIpcRequest('health', {}, 30000, 'read');
+        return new Response(JSON.stringify(result), {
+          headers: applySecurityHeaders({ 'content-type': 'application/json' }),
+        });
+      }
+
+      // 1a. API: /api/copyright
+      if (rawPathname === '/api/copyright') {
+        const result = await sendIpcRequest('copyright', {}, 30000, 'read');
         return new Response(JSON.stringify(result), {
           headers: applySecurityHeaders({ 'content-type': 'application/json' }),
         });

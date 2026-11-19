@@ -1,5 +1,10 @@
 {
-  "name": "tanstack_start_ts",
+  "name": "urban-flow",
+  "version": "1.0.0",
+  "description": "Urban Flow - Adaptive Traffic Signal System",
+  "author": "Harsh Aggarwal <aggarwalharsh663@gmail.com>",
+  "copyright": "Copyright (c) 2026 Harsh Aggarwal. All rights reserved.",
+  "license": "SEE LICENSE IN ../LICENSE",
   "private": true,
   "main": "electron/main.cjs",
   "sideEffects": false,

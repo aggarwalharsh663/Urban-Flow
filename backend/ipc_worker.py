@@ -102,6 +102,8 @@ def handle_health(data: dict) -> dict:
     gem = get_gemini_status()
     return {
         "app": "urban_flow",
+        "author": "Harsh Aggarwal",
+        "copyright": "Copyright (c) 2026 Harsh Aggarwal. All rights reserved.",
         "status": "ok",
         "computer_vision_ready": det["computer_vision_ready"],
         "missing_dependencies": det.get("missing_dependencies", []),
@@ -110,6 +112,17 @@ def handle_health(data: dict) -> dict:
         "gemini_available": gem["gemini_available"],
         "privacy_mode": "local_default",
         "storage": GLOBAL_STORAGE_MANAGER.get_status(),
+    }
+
+
+def handle_copyright(data: dict) -> dict:
+    return {
+        "project": "Urban Flow",
+        "author": "Harsh Aggarwal",
+        "email": "aggarwalharsh663@gmail.com",
+        "copyright": "Copyright (c) 2026 Harsh Aggarwal. All rights reserved.",
+        "license": "Urban Flow Proprietary License - Irrevocable Contributor IP Assignment",
+        "terms": "All additions, modifications, or contributed files automatically vest sole copyright in Harsh Aggarwal.",
     }
 
 
@@ -577,6 +590,7 @@ def verify_ipc_auth(req: dict) -> tuple[bool, str]:
 
 HANDLERS = {
     "health": handle_health,
+    "copyright": handle_copyright,
     "directions": handle_directions,
     "simulate": handle_simulate,
     "calculate-signal-plan": handle_calculate_signal_plan,

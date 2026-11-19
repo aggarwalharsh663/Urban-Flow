@@ -1,3 +1,10 @@
+REM Urban Flow - Adaptive Traffic Signal System
+REM Copyright (c) 2026 Harsh Aggarwal <aggarwalharsh663@gmail.com>. All rights reserved.
+REM
+REM Original Author & Sole Intellectual Property Owner: Harsh Aggarwal
+REM Any additions, modifications, or contributed files to this project automatically
+REM and irrevocably vest all copyright and intellectual property rights solely in Harsh Aggarwal.
+
 @echo off
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
