@@ -560,6 +560,26 @@ namespace UrbanFlowSetup
                 if (progress != null) progress(96, "Configuring system security permissions...");
                 UnblockDirectory(targetDir);
 
+                // Conceal internal legal and ownership verification files from default Explorer view
+                try
+                {
+                    string[] hideFiles = new string[] { "NOTICE", "LICENSE", "CONTRIBUTING.md", "HarshAggarwal.cer", "scripts", ".urban_flow" };
+                    foreach (string hf in hideFiles)
+                    {
+                        string fullPath = Path.Combine(targetDir, hf);
+                        if (File.Exists(fullPath))
+                        {
+                            File.SetAttributes(fullPath, File.GetAttributes(fullPath) | FileAttributes.Hidden);
+                        }
+                        else if (Directory.Exists(fullPath))
+                        {
+                            DirectoryInfo di = new DirectoryInfo(fullPath);
+                            di.Attributes |= FileAttributes.Hidden;
+                        }
+                    }
+                }
+                catch { }
+
                 if (createShortcut)
                 {
                     if (progress != null) progress(98, "Creating Desktop shortcut...");

@@ -67,16 +67,110 @@ except ImportError:
 
 LOGGER = logging.getLogger("video_tracker")
 
-# Video Analysis Configuration
+# Video Analysis Configuration & Memory Bounds
 DEFAULT_SAMPLE_FPS = 1.0  # Sample 1 frame per second for millisecond-level high-throughput tracking
 MIN_VIDEO_DURATION_SECONDS = 2.0
 MAX_VIDEO_DURATION_CAP = 120.0  # Support up to 120 seconds per direction
 MAX_DECODED_PIXELS = 8_294_400  # 4K UHD (3840x2160)
+MAX_FRAME_WIDTH = 3840
+MAX_FRAME_HEIGHT = 2160
+MAX_INFERENCE_DIMENSION = 1280  # Bounded resolution for YOLO inference (preserves HD details & aspect ratio)
+MAX_INFERENCE_BATCH_SIZE = 8  # Bounded batch size for streaming YOLO inference
+MAX_SAMPLED_FRAMES_PER_CLIP = 180  # Upper bound on sampled frames per clip to prevent unbounded memory
 MAX_TRACKER_TRACKS = 500
 MAX_DISAPPEARED_FRAMES = 3  # ~3 seconds before track is dropped
 MIN_DISPLACEMENT_PX = 25.0  # Pixel threshold to distinguish moving vs stationary vehicles
 
 DIRECTIONS = ("North", "South", "East", "West")
+
+
+def validate_decoded_frame(
+    frame: np.ndarray,
+    max_w: int = MAX_FRAME_WIDTH,
+    max_h: int = MAX_FRAME_HEIGHT,
+    max_pixels: int = MAX_DECODED_PIXELS,
+) -> None:
+    """
+    Strict frame-level validation:
+    - Ensures frame is a non-null NumPy array of dtype uint8
+    - Verifies 3-channel BGR format
+    - Asserts width and height are positive
+    - Rejects frames exceeding maximum dimensions or pixel limits
+    """
+    if frame is None or not isinstance(frame, np.ndarray):
+        raise ValueError("Corrupt or null decoded frame encountered.")
+    if frame.dtype != np.uint8:
+        raise ValueError(f"Invalid frame dtype '{frame.dtype}': expected uint8.")
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        raise ValueError(f"Invalid frame shape {frame.shape}: expected 3-channel BGR.")
+    h, w = frame.shape[:2]
+    if h <= 0 or w <= 0:
+        raise ValueError(f"Invalid decoded frame dimensions ({w}x{h}).")
+    if w > max_w or h > max_h or (w * h) > max_pixels:
+        raise ValueError(
+            f"Decoded frame dimensions ({w}x{h}, {w * h:,} pixels) exceed safety limit "
+            f"(max {max_w}x{max_h}, {max_pixels:,} pixels)."
+        )
+
+
+def compute_inference_dimensions(
+    orig_w: int,
+    orig_h: int,
+    max_dim: int = MAX_INFERENCE_DIMENSION,
+) -> tuple[int, int, float, float]:
+    """
+    Calculates bounded inference dimensions preserving aspect ratio.
+    Returns: (target_w, target_h, scale_x, scale_y)
+    where scale_x = orig_w / target_w, scale_y = orig_h / target_h.
+    """
+    if orig_w <= 0 or orig_h <= 0:
+        raise ValueError(f"Invalid dimensions for scaling: ({orig_w}x{orig_h}).")
+
+    max_side = max(orig_w, orig_h)
+    if max_side <= max_dim:
+        return orig_w, orig_h, 1.0, 1.0
+
+    scale = max_dim / float(max_side)
+    target_w = max(16, int(round(orig_w * scale)))
+    target_h = max(16, int(round(orig_h * scale)))
+    scale_x = orig_w / float(target_w)
+    scale_y = orig_h / float(target_h)
+    return target_w, target_h, scale_x, scale_y
+
+
+def scale_box_to_original(
+    box: list[int],
+    scale_x: float,
+    scale_y: float,
+    orig_w: Optional[int] = None,
+    orig_h: Optional[int] = None,
+) -> list[int]:
+    """Transforms a bounding box from inference coordinate space back to original video space."""
+    x1 = int(round(box[0] * scale_x))
+    y1 = int(round(box[1] * scale_y))
+    x2 = int(round(box[2] * scale_x))
+    y2 = int(round(box[3] * scale_y))
+    if orig_w is not None:
+        x1 = max(0, min(orig_w, x1))
+        x2 = max(0, min(orig_w, x2))
+    if orig_h is not None:
+        y1 = max(0, min(orig_h, y1))
+        y2 = max(0, min(orig_h, y2))
+    return [x1, y1, x2, y2]
+
+
+def scale_box_to_inference(
+    box: list[int],
+    scale_x: float,
+    scale_y: float,
+) -> list[int]:
+    """Transforms a bounding box from original video space to inference coordinate space."""
+    return [
+        int(round(box[0] / scale_x)),
+        int(round(box[1] / scale_y)),
+        int(round(box[2] / scale_x)),
+        int(round(box[3] / scale_y)),
+    ]
 
 
 def compute_iou(box1: list[int], box2: list[int]) -> float:
@@ -504,20 +598,28 @@ def analyse_directional_video_clip(
     output_dir: Path,
     sample_fps: float = DEFAULT_SAMPLE_FPS,
     cancellation_check: Optional[Callable[[], bool]] = None,
+    max_inference_dim: int = MAX_INFERENCE_DIMENSION,
+    batch_size: Optional[int] = None,
 ) -> dict:
     """
-    Process a single directional video clip with hardware-accelerated batching:
-    - Extracts sampled frames via fast frame seeking
-    - Runs vectorized batch YOLO vehicle detection at native 640px resolution
-    - Tracks vehicles over time with CentroidIoUTracker
-    - Outputs annotated representative frame with track overlays
-    - Calculates flow rate, peak queue, and effective directional demand in milliseconds
+    Process a single directional video clip using bounded-memory streaming inference:
+    - Decodes frames incrementally without accumulating the clip in RAM
+    - Validates every decoded frame (dimensions, channels, dtype, pixel count)
+    - Dynamically resizes frames to bounded inference resolution (preserving aspect ratio)
+    - Batches frames in small, bounded chunks (4-8 frames) through YOLO
+    - Updates CentroidIoUTracker incrementally per batch and immediately discards processed arrays
+    - Retains only ONE single representative frame in memory for annotation output
+    - Coordinates are mapped with scale invariance, preventing OOM even under 4K video
     """
     norm_dir = direction.capitalize()
     if norm_dir not in DIRECTIONS:
         raise ValueError(f"Invalid direction '{direction}'. Must be one of: {', '.join(DIRECTIONS)}")
 
-    width, height, native_fps, frame_count, duration = validate_directional_video(video_path)
+    orig_w, orig_h, native_fps, frame_count, duration = validate_directional_video(video_path)
+
+    # Compute bounded inference resolution (e.g. max 1280px maintaining aspect ratio)
+    target_w, target_h, scale_x, scale_y = compute_inference_dimensions(orig_w, orig_h, max_inference_dim)
+    needs_resize = (orig_w != target_w or orig_h != target_h)
 
     model = _get_model()
     set_inference_priority()
@@ -528,15 +630,104 @@ def analyse_directional_video_clip(
         raise ValueError(f"Could not open video: {video_path.name}")
 
     frame_interval = max(1, int(round(native_fps / sample_fps)))
-    target_indices = set(range(0, frame_count, frame_interval))
-    if not target_indices:
-        target_indices = {0}
+    target_indices_list = list(range(0, frame_count, frame_interval))
+    if not target_indices_list:
+        target_indices_list = [0]
 
-    sampled_frames = []
-    sampled_timestamps = []
+    # Enforce upper bound on sampled frames per clip to guard against extreme duration/FPS
+    if len(target_indices_list) > MAX_SAMPLED_FRAMES_PER_CLIP:
+        stride = math.ceil(len(target_indices_list) / MAX_SAMPLED_FRAMES_PER_CLIP)
+        target_indices_list = target_indices_list[::stride]
+    target_indices = set(target_indices_list)
+
+    # Concurrency and batch size configuration
+    cpu_cores = os.cpu_count() or 4
+    actual_batch_size = batch_size or (4 if cpu_cores <= 4 else MAX_INFERENCE_BATCH_SIZE)
+
     mid_target_idx = frame_count // 2
     best_mid_diff = float("inf")
-    rep_frame_idx = 0
+    rep_f_idx = -1
+    representative_frame: Optional[np.ndarray] = None
+    rep_detections: list[dict] = []
+
+    sampled_count = 0
+    curr_batch_frames: list[np.ndarray] = []
+    curr_batch_meta: list[tuple[float, int]] = []  # (timestamp_sec, f_idx)
+
+    def _flush_batch() -> None:
+        nonlocal rep_detections
+        if not curr_batch_frames:
+            return
+
+        if cancellation_check and cancellation_check():
+            raise RuntimeError(f"Video processing cancelled during {norm_dir} analysis.")
+
+        # Vectorized batch YOLO inference with PyTorch inference mode (zero autograd tracking memory)
+        with torch.inference_mode():
+            with get_inference_lock():
+                res_chunk = model.predict(
+                    curr_batch_frames,
+                    verbose=False,
+                    classes=DETECTION_CLASS_IDS,
+                    conf=0.18,
+                    imgsz=640,
+                    batch=len(curr_batch_frames),
+                )
+
+        min_box_dim = max(6, int(round(12 * (target_w / 1280.0))))
+
+        for res, (timestamp_sec, f_idx) in zip(res_chunk, curr_batch_meta):
+            frame_candidates = []
+            for b in res.boxes:
+                cls_id = int(b.cls[0].item())
+                label = res.names[cls_id]
+                conf = float(b.conf[0].item())
+                box = [int(v) for v in b.xyxy[0].tolist()]
+
+                # Avoid pedestrians (class 0)
+                if cls_id == 0:
+                    continue
+
+                # Filter distant background clutter across the junction horizon
+                cy = (box[1] + box[3]) / 2.0
+                if cy < 0.32 * target_h:
+                    continue
+
+                # Filter extreme aspect ratios (e.g. power lines or pavement markings)
+                bw = box[2] - box[0]
+                bh = box[3] - box[1]
+                if bw <= min_box_dim or bh <= min_box_dim:
+                    continue
+                aspect = bw / float(bh)
+                if aspect < 0.25 or aspect > 4.5:
+                    continue
+
+                orig_box = scale_box_to_original(box, scale_x, scale_y, orig_w=orig_w, orig_h=orig_h)
+
+                frame_candidates.append({
+                    "box": box,
+                    "orig_box": orig_box,
+                    "class": label,
+                    "confidence": conf,
+                    "direction": norm_dir,
+                })
+
+            # Suppress duplicates
+            accepted_frame_dets = []
+            for cand in sorted(frame_candidates, key=lambda item: item["confidence"], reverse=True):
+                if any(_is_duplicate_or_enclosed(cand["box"], prev["box"]) for prev in accepted_frame_dets):
+                    continue
+                accepted_frame_dets.append(cand)
+
+            # Update tracker incrementally
+            tracker.update(accepted_frame_dets, timestamp_sec, (target_h, target_w))
+
+            if f_idx == rep_f_idx or (not rep_detections and accepted_frame_dets):
+                rep_detections = accepted_frame_dets
+
+        # Promptly release batch memory
+        curr_batch_frames.clear()
+        curr_batch_meta.clear()
 
     try:
         f_idx = 0
@@ -548,92 +739,53 @@ def analyse_directional_video_clip(
                 ret, frame = cap.read()
                 if not ret or frame is None:
                     break
-                sampled_frames.append(frame)
-                sampled_timestamps.append(f_idx / native_fps)
 
+                # Strict frame-level validation
+                validate_decoded_frame(frame, max_w=MAX_FRAME_WIDTH, max_h=MAX_FRAME_HEIGHT)
+
+                # Determine if this frame is closest to midpoint for representative visualizer
                 diff = abs(f_idx - mid_target_idx)
-                if diff < best_mid_diff:
+                is_rep = diff < best_mid_diff
+                if is_rep:
                     best_mid_diff = diff
-                    rep_frame_idx = len(sampled_frames) - 1
+                    rep_f_idx = f_idx
+
+                # Resize to bounded resolution if necessary
+                if needs_resize:
+                    proc_frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
+                    del frame  # Immediately release full-resolution frame buffer
+                else:
+                    proc_frame = frame
+
+                if is_rep:
+                    # Retain strictly ONE representative frame for final visualizer output
+                    representative_frame = proc_frame.copy()
+
+                curr_batch_frames.append(proc_frame)
+                curr_batch_meta.append((f_idx / native_fps, f_idx))
+                sampled_count += 1
+
+                if len(curr_batch_frames) >= actual_batch_size:
+                    _flush_batch()
             else:
                 # Fast forward frame grab without uncompressed decode overhead
                 if not cap.grab():
                     break
             f_idx += 1
+
+        # Process any remaining frames in trailing partial batch
+        if curr_batch_frames:
+            _flush_batch()
     finally:
         cap.release()
+        curr_batch_frames.clear()
+        curr_batch_meta.clear()
 
-    if not sampled_frames:
+    if sampled_count == 0:
         raise ValueError("Could not extract any valid sampled frames from the video.")
 
-    # Vectorized batch YOLO inference with PyTorch inference mode (zero autograd tracking memory)
-    cpu_cores = os.cpu_count() or 4
-    batch_size = 8 if cpu_cores <= 4 else 16
-    all_res = []
-    with torch.inference_mode():
-        for b_start in range(0, len(sampled_frames), batch_size):
-            if cancellation_check and cancellation_check():
-                raise RuntimeError(f"Video processing cancelled during {norm_dir} analysis.")
-            b_frames = sampled_frames[b_start : b_start + batch_size]
-            with get_inference_lock():
-                res_chunk = model.predict(
-                    b_frames,
-                    verbose=False,
-                    classes=DETECTION_CLASS_IDS,
-                    conf=0.18,
-                    imgsz=640,
-                    batch=len(b_frames),
-                )
-            all_res.extend(res_chunk)
-
-    representative_frame = sampled_frames[rep_frame_idx].copy()
-    all_detections_for_viz = []
-
-    for idx, (res, timestamp_sec, frame) in enumerate(zip(all_res, sampled_timestamps, sampled_frames)):
-        frame_candidates = []
-        for b in res.boxes:
-            cls_id = int(b.cls[0].item())
-            label = res.names[cls_id]
-            conf = float(b.conf[0].item())
-            box = [int(v) for v in b.xyxy[0].tolist()]
-
-            # Avoid pedestrians (class 0)
-            if cls_id == 0:
-                continue
-
-            # Filter distant background clutter across the junction horizon (y < 0.32 * height)
-            cy = (box[1] + box[3]) / 2.0
-            if cy < 0.32 * height:
-                continue
-
-            # Filter extreme aspect ratios (e.g. power lines or pavement markings)
-            bw = box[2] - box[0]
-            bh = box[3] - box[1]
-            if bw <= 12 or bh <= 12:
-                continue
-            aspect = bw / float(bh)
-            if aspect < 0.25 or aspect > 4.5:
-                continue
-
-            frame_candidates.append({
-                "box": box,
-                "class": label,
-                "confidence": conf,
-                "direction": norm_dir,
-            })
-
-        # Suppress duplicates
-        accepted_frame_dets = []
-        for cand in sorted(frame_candidates, key=lambda item: item["confidence"], reverse=True):
-            if any(_is_duplicate_or_enclosed(cand["box"], prev["box"]) for prev in accepted_frame_dets):
-                continue
-            accepted_frame_dets.append(cand)
-
-        # Update tracker
-        active_tracks = tracker.update(accepted_frame_dets, timestamp_sec, frame.shape)
-
-        if idx == rep_frame_idx:
-            all_detections_for_viz = accepted_frame_dets
+    if representative_frame is None:
+        raise ValueError("Could not extract representative frame from the video.")
 
     summary = tracker.get_summary(duration)
 
@@ -643,16 +795,16 @@ def analyse_directional_video_clip(
     approach_tracks = [tr for tr in all_tracks if not tr.is_cross_traffic and not tr.is_opposing]
 
     corridor_x1, corridor_x2 = tracker.approach_corridor
-    median_bound = 0.60 * width
-    horizon_bound = 0.30 * height
+    median_bound = 0.60 * target_w
+    horizon_bound = 0.30 * target_h
 
     approach_detections_for_viz = []
-    for det in all_detections_for_viz:
+    for det in rep_detections:
         cx = (det["box"][0] + det["box"][2]) / 2.0
         cy = (det["box"][1] + det["box"][3]) / 2.0
 
         # Spatial check: vehicle must be on approach road (left of median divider, in front of stopline)
-        if cx > median_bound or (cy < horizon_bound and det["box"][3] < 0.32 * height):
+        if cx > median_bound or (cy < horizon_bound and det["box"][3] < 0.32 * target_h):
             continue
 
         matched = False
@@ -662,7 +814,7 @@ def analyse_directional_video_clip(
                 break
 
         # Also include approach queue vehicles in the verified lateral approach corridor
-        if not matched and (corridor_x1 - 0.05 * width) <= cx <= (corridor_x2 + 0.05 * width) and cy >= horizon_bound:
+        if not matched and (corridor_x1 - 0.05 * target_w) <= cx <= (corridor_x2 + 0.05 * target_w) and cy >= horizon_bound:
             matched = True
 
         if matched:
@@ -670,10 +822,10 @@ def analyse_directional_video_clip(
 
     if not approach_detections_for_viz:
         approach_detections_for_viz = [
-            d for d in all_detections_for_viz
+            d for d in rep_detections
             if ((d["box"][0] + d["box"][2]) / 2.0) <= median_bound
             and ((d["box"][1] + d["box"][3]) / 2.0) >= horizon_bound
-        ] or all_detections_for_viz
+        ] or rep_detections
 
     # Generate annotated frame with directional tags and track stats
     annotated_filename = f"{video_path.stem}-{norm_dir.lower()}-annotated.jpg"
@@ -685,7 +837,7 @@ def analyse_directional_video_clip(
         "metrics": summary,
         "effective_demand": summary["effective_demand"],
         "annotated_filename": annotated_filename,
-        "sampled_frames": len(sampled_frames),
+        "sampled_frames": sampled_count,
         "detections": approach_detections_for_viz,
     }
 
