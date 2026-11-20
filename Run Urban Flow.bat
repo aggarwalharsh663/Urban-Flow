@@ -11,7 +11,7 @@ cd /d "%~dp0"
 
 echo ============================================================
 echo  Urban Flow - Adaptive Traffic Signal System
-echo  Launching Local AI Models & Desktop Application...
+echo  Launching Local AI Models and Desktop Application...
 echo ============================================================
 
 set "ELECTRON_EXE=%~dp0frontend\node_modules\electron\dist\electron.exe"

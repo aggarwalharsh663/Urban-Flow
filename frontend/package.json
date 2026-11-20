@@ -12,7 +12,7 @@
   "scripts": {
     "app": "electron .",
     "dev": "vite dev",
-    "build": "vite build",
+    "build": "vite build && node render_exact_ssr.js",
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
     "lint": "eslint .",

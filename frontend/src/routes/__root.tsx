@@ -1,3 +1,12 @@
+/*
+ * Urban Flow - Adaptive Traffic Signal System
+ * Copyright (c) 2026 Harsh Aggarwal <aggarwalharsh663@gmail.com>. All rights reserved.
+ *
+ * Original Author & Sole Intellectual Property Owner: Harsh Aggarwal
+ * Any additions, modifications, or contributed files to this project automatically
+ * and irrevocably vest all copyright and intellectual property rights solely in Harsh Aggarwal.
+ */
+
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   Outlet,
@@ -79,8 +88,6 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "UrbanFlow" },
-      { name: "author", content: "Harsh Aggarwal" },
-      { name: "copyright", content: "Copyright (c) 2026 Harsh Aggarwal. All rights reserved." },
       { name: "theme-color", content: "#07111f" },
       { name: "description", content: "Adaptive traffic signal timing prototype." },
       { property: "og:title", content: "UrbanFlow" },
@@ -89,13 +96,14 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: "twitter:card", content: "summary_large_image" },
     ],
     links: [
+      { rel: "preload", as: "image", href: "/urban-flow-dark.png" },
       {
         rel: "stylesheet",
         href: appCss,
       },
+      { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@500;600;700;800&display=swap" },
       { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
-      { rel: "stylesheet", href: "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=JetBrains+Mono:wght@500;600;700;800&display=swap" },
     ],
   }),
   shellComponent: RootShell,
@@ -109,11 +117,6 @@ function RootShell({ children }: { children: ReactNode }) {
     <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `(function(){try{var s=localStorage.getItem("urban-flow-theme");var t=(s==="light"||s==="dark")?s:"dark";document.documentElement.dataset.theme=t;}catch(e){}})();`,
-          }}
-        />
       </head>
       <body suppressHydrationWarning>
         {children}

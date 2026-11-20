@@ -607,19 +607,19 @@ namespace UrbanFlowSetup
                 IShellLinkW link = (IShellLinkW)new ShellLink();
                 link.SetDescription("Urban Flow - Adaptive Traffic Signal System");
 
-                if (File.Exists(exePath))
+                if (File.Exists(electronExe))
                 {
-                    link.SetPath(exePath);
-                    link.SetWorkingDirectory(targetDir);
+                    link.SetPath(electronExe);
+                    link.SetArguments("\"" + frontendDir + "\"");
+                    link.SetWorkingDirectory(frontendDir);
                     if (File.Exists(iconPath))
                     {
                         link.SetIconLocation(iconPath, 0);
                     }
                 }
-                else if (File.Exists(electronExe))
+                else if (File.Exists(exePath))
                 {
-                    link.SetPath(electronExe);
-                    link.SetArguments("\"" + frontendDir + "\"");
+                    link.SetPath(exePath);
                     link.SetWorkingDirectory(targetDir);
                     if (File.Exists(iconPath))
                     {
@@ -629,6 +629,13 @@ namespace UrbanFlowSetup
 
                 IPersistFile file = (IPersistFile)link;
                 file.Save(shortcutPath, false);
+
+                string startMenuPath = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
+                if (Directory.Exists(startMenuPath))
+                {
+                    string startMenuShortcut = Path.Combine(startMenuPath, "Urban Flow.lnk");
+                    file.Save(startMenuShortcut, false);
+                }
             }
             catch { }
         }
@@ -641,21 +648,21 @@ namespace UrbanFlowSetup
                 string electronExe = Path.Combine(targetDir, "frontend", "node_modules", "electron", "dist", "electron.exe");
                 string frontendDir = Path.Combine(targetDir, "frontend");
 
-                if (File.Exists(exePath))
-                {
-                    Process.Start(new ProcessStartInfo
-                    {
-                        FileName = exePath,
-                        WorkingDirectory = targetDir,
-                        UseShellExecute = true
-                    });
-                }
-                else if (File.Exists(electronExe))
+                if (File.Exists(electronExe))
                 {
                     Process.Start(new ProcessStartInfo
                     {
                         FileName = electronExe,
                         Arguments = "\"" + frontendDir + "\"",
+                        WorkingDirectory = frontendDir,
+                        UseShellExecute = true
+                    });
+                }
+                else if (File.Exists(exePath))
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = exePath,
                         WorkingDirectory = targetDir,
                         UseShellExecute = true
                     });

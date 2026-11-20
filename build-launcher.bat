@@ -27,4 +27,7 @@ if errorlevel 1 (
 )
 
 echo Urban Flow.exe built successfully.
+
+powershell -NoProfile -Command "$cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -like '*Harsh Aggarwal*' } | Select-Object -First 1; if ($cert) { Set-AuthenticodeSignature -FilePath 'Urban Flow.exe' -Certificate $cert | Out-Null; Write-Host 'Urban Flow.exe signed with:' $cert.Thumbprint }; Unblock-File -Path 'Urban Flow.exe' -ErrorAction SilentlyContinue"
+
 endlocal

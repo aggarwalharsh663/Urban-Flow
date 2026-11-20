@@ -30,7 +30,7 @@ process.on('uncaughtException', (err) => {
   log('UNCAUGHT EXCEPTION:', err && err.stack ? err.stack : err);
 });
 process.on('unhandledRejection', (reason) => {
-  log('UNHANDLED REJECTION:', reason);
+  log('UNHANDLED REJECTION:', reason && reason.stack ? reason.stack : reason);
 });
 
 let mainWindow = null;
@@ -995,8 +995,6 @@ function createWindow() {
   });
 
   const appUrl = 'app://urbanflow/';
-  log('Loading portless URL into mainWindow:', appUrl);
-  mainWindow.loadURL(appUrl);
 
   let isMainShown = false;
   const showMainWindow = () => {
@@ -1095,6 +1093,11 @@ function createWindow() {
   mainWindow.on('closed', () => {
     log('mainWindow closed');
     mainWindow = null;
+  });
+
+  log('Loading portless URL into mainWindow:', appUrl);
+  mainWindow.loadURL(appUrl).catch((err) => {
+    log('mainWindow.loadURL error:', err && err.stack ? err.stack : err);
   });
 }
 
