@@ -41,11 +41,6 @@ if errorlevel 1 (
         start "" "%~dp0frontend\node_modules\electron\dist\electron.exe" "%~dp0frontend"
         exit /b 0
     )
-    if exist "%~dp0Urban Flow.exe" (
-        echo [START] Launching Urban Flow Desktop Application...
-        start "" "%~dp0Urban Flow.exe"
-        exit /b 0
-    )
     echo [ERROR] Neither Node.js nor bundled Electron executable was found.
     pause
     exit /b 1

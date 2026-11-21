@@ -120,10 +120,13 @@ def create_signal_plan(
     green_times = calculate_green_times(counts, green_budget=green_budget)
     busiest = max(DIRECTIONS, key=lambda direction: (counts[direction], -DIRECTIONS.index(direction)))
     total_green = sum(green_times.values())
-    total_full_cycle = total_green  # Full cycle matches the configured cycle budget (e.g. 120s, not 140s)
+    total_full_cycle = total_green + (yellow_seconds + all_red_seconds) * len(DIRECTIONS)
 
     red_times = {
-        direction: max(0, total_full_cycle - green_times[direction] - yellow_seconds)
+        direction: max(
+            0,
+            total_full_cycle - green_times[direction] - yellow_seconds - all_red_seconds,
+        )
         for direction in DIRECTIONS
     }
     red_yellow_times = {
@@ -143,6 +146,7 @@ def create_signal_plan(
         "red_times": red_times,
         "red_yellow_times": red_yellow_times,
         "yellow_seconds": yellow_seconds,
+        "all_red_seconds": all_red_seconds,
         "status": {
             direction: "Low" if counts[direction] < 5 else "Medium" if counts[direction] < 15 else "High"
             for direction in DIRECTIONS

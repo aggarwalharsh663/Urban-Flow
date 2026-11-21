@@ -1,3 +1,10 @@
+# Urban Flow - Adaptive Traffic Signal System
+# Copyright (c) 2026 Harsh Aggarwal <aggarwalharsh663@gmail.com>. All rights reserved.
+#
+# Original Author & Sole Intellectual Property Owner: Harsh Aggarwal
+# Any additions, modifications, or contributed files to this project automatically
+# and irrevocably vest all copyright and intellectual property rights solely in Harsh Aggarwal.
+
 from __future__ import annotations
 
 import asyncio
@@ -8,7 +15,7 @@ import os
 import re
 import uuid
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 from dotenv import load_dotenv
 from fastapi import (
@@ -409,6 +416,20 @@ async def _store_upload(file: UploadFile, allowed_suffixes: set[str]) -> tuple[P
     return destination, filename
 
 
+def is_path_contained(base_dir: Path, target: Path) -> bool:
+    """
+    Establish genuine filesystem directory containment.
+    Verifies that target resolves strictly inside base_dir, preventing prefix confusion,
+    directory traversal sequences (../ or ..\\), and symlink boundary escapes.
+    """
+    try:
+        resolved_base = base_dir.resolve()
+        resolved_target = target.resolve()
+        return resolved_target.is_relative_to(resolved_base) and resolved_target != resolved_base
+    except (ValueError, AttributeError, OSError, RuntimeError):
+        return False
+
+
 # 7. Secure Upload Serving Endpoint (R3, R2: Protected Media Serving)
 @app.get("/uploads/{filename}")
 async def serve_upload(
@@ -425,7 +446,7 @@ async def serve_upload(
       2. Short-lived HMAC media ticket via query parameter for safe web <img> rendering (R2).
     """
     # Strict filename format check first: only media extensions are eligible (R3)
-    pattern = r"^[a-zA-Z0-9_-]+(\.(jpg|jpeg|png|mp4))$"
+    pattern = r"^[a-zA-Z0-9_-]+(\.(jpg|jpeg|png|mp4|avi))$"
     match = re.match(pattern, filename.lower())
     if not match:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found.")
@@ -445,11 +466,16 @@ async def serve_upload(
             detail="Unauthorized: Access to media requires valid authentication or a media ticket.",
         )
 
-    file_path = (UPLOAD_DIR / filename).resolve()
-    # Path containment check
-    if not str(file_path).startswith(str(UPLOAD_DIR.resolve())):
+    target_path = UPLOAD_DIR / filename
+    try:
+        resolved_file_path = target_path.resolve()
+    except (OSError, RuntimeError):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found.")
+
+    # Strict filesystem path containment check (replaces prefix matching; prevents prefix confusion)
+    if not is_path_contained(UPLOAD_DIR, target_path):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
-    if not file_path.is_file():
+    if not resolved_file_path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found.")
 
     ext = match.group(1).lower()
@@ -458,11 +484,12 @@ async def serve_upload(
         ".jpeg": "image/jpeg",
         ".png": "image/png",
         ".mp4": "video/mp4",
+        ".avi": "video/x-msvideo",
     }
     content_type = media_types.get(ext, "application/octet-stream")
 
-    response = FileResponse(path=file_path, media_type=content_type)
-    response.headers["Content-Disposition"] = f'inline; filename="{file_path.name}"'
+    response = FileResponse(path=resolved_file_path, media_type=content_type)
+    response.headers["Content-Disposition"] = f'inline; filename="{resolved_file_path.name}"'
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
     response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
@@ -751,8 +778,21 @@ async def analyse_multi_video_endpoint(
         )
 
     saved_paths: dict[str, Path] = {}
+    temp_files: list[Path] = []
     total_size = 0
     reservation_id = None
+
+    # Pre-reserve safe initial capacity (10 MB per video)
+    init_reserve_bytes = min(MAX_STORAGE_BYTES, 10 * 1024 * 1024 * len(provided_files))
+    init_reserved, reservation_id = GLOBAL_STORAGE_MANAGER.reserve(init_reserve_bytes)
+    if not init_reserved:
+        raise HTTPException(
+            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+            detail="Storage quota exceeded (500 MB limit reached). Automatic cleanup was unable to free enough space.",
+        )
+
+    # Measure base usage after reservation cleanup has freed storage space
+    base_usage = GLOBAL_STORAGE_MANAGER.calculate_usage()
 
     try:
         for d, upload_file in provided_files.items():
@@ -765,6 +805,9 @@ async def analyse_multi_video_endpoint(
 
             dest_filename = f"{uuid.uuid4().hex}{suffix}"
             dest_path = UPLOAD_DIR / dest_filename
+            temp_path = UPLOAD_DIR / f".tmp_{dest_filename}"
+            temp_files.append(temp_path)
+            GLOBAL_STORAGE_MANAGER.mark_active(temp_path)
 
             header = await upload_file.read(32)
             if not verify_magic_bytes(header, suffix):
@@ -775,7 +818,7 @@ async def analyse_multi_video_endpoint(
 
             await upload_file.seek(0)
             file_bytes = 0
-            with dest_path.open("wb") as out:
+            with temp_path.open("wb") as out:
                 while chunk := await upload_file.read(65536):
                     file_bytes += len(chunk)
                     if file_bytes > MAX_VIDEO_UPLOAD_SIZE_BYTES:
@@ -783,16 +826,42 @@ async def analyse_multi_video_endpoint(
                             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                             detail=f"Video for {d} exceeds 150 MB limit.",
                         )
+                    if base_usage + total_size + file_bytes > MAX_STORAGE_BYTES:
+                        raise HTTPException(
+                            status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
+                            detail="Storage quota exceeded (500 MB limit reached).",
+                        )
                     out.write(chunk)
 
+            if file_bytes == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Video for {d} is empty.",
+                )
+
+            # Deep video file validation (dimensions, decodability, duration, frame count)
+            try:
+                validate_video_file(temp_path)
+            except ValueError as ve:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid video for {d}: {ve}",
+                )
+
+            temp_path.replace(dest_path)
+            GLOBAL_STORAGE_MANAGER.unmark_active(temp_path)
+            GLOBAL_STORAGE_MANAGER.mark_active(dest_path)
             total_size += file_bytes
             saved_paths[d] = dest_path
 
+        # Update quota reservation to exact total size
+        GLOBAL_STORAGE_MANAGER.release(reservation_id)
+        reservation_id = None
         reserved, reservation_id = GLOBAL_STORAGE_MANAGER.reserve(total_size)
         if not reserved:
             raise HTTPException(
                 status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
-                detail="Storage quota exceeded (500 MB limit).",
+                detail="Storage quota exceeded (500 MB limit reached).",
             )
 
         sanitized_name = sanitize_junction_name(junction_name or "Multi-Camera Junction")
@@ -822,16 +891,32 @@ async def analyse_multi_video_endpoint(
         cleanup_storage(UPLOAD_DIR, REPORT_DIR)
         return save_report_atomic(report, REPORT_DIR, source_channel="api")
     except HTTPException:
+        for p in temp_files:
+            if p and p.is_file():
+                p.unlink(missing_ok=True)
+            GLOBAL_STORAGE_MANAGER.unmark_active(p)
         for p in saved_paths.values():
             if p and p.is_file():
                 p.unlink(missing_ok=True)
+            GLOBAL_STORAGE_MANAGER.unmark_active(p)
         raise
     except Exception as exc:
+        for p in temp_files:
+            if p and p.is_file():
+                p.unlink(missing_ok=True)
+            GLOBAL_STORAGE_MANAGER.unmark_active(p)
         for p in saved_paths.values():
             if p and p.is_file():
                 p.unlink(missing_ok=True)
+            GLOBAL_STORAGE_MANAGER.unmark_active(p)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc))
     finally:
+        for p in temp_files:
+            if p and p.is_file():
+                p.unlink(missing_ok=True)
+            GLOBAL_STORAGE_MANAGER.unmark_active(p)
+        for p in saved_paths.values():
+            GLOBAL_STORAGE_MANAGER.unmark_active(p)
         if reservation_id:
             GLOBAL_STORAGE_MANAGER.release(reservation_id)
 
@@ -882,6 +967,9 @@ def update_report_cycle(
     )
     updated_report["report_id"] = report_id
     updated_report["analysed_at"] = report["analysed_at"]
+    for field in ("directional_metrics", "annotated_files", "original_files"):
+        if field in report:
+            updated_report[field] = report[field]
     return save_report_atomic(updated_report, REPORT_DIR, source_channel="api")
 
 
@@ -923,6 +1011,9 @@ def update_report_counts(
     )
     updated_report["report_id"] = report_id
     updated_report["analysed_at"] = report["analysed_at"]
+    for field in ("directional_metrics", "annotated_files", "original_files"):
+        if field in report:
+            updated_report[field] = report[field]
     return save_report_atomic(updated_report, REPORT_DIR, source_channel="api")
 
 

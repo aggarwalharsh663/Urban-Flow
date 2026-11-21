@@ -97,3 +97,13 @@ def test_gemini_detections_capped_at_500():
     parsed = _parse_detections(mock_resp, 1000, 1000)
     assert len(parsed) <= security_config.MAX_GEMINI_DETECTIONS
     assert len(parsed) == 500
+
+
+def test_counts_input_runtime_type_hints():
+    """Verify runtime type annotation evaluation for CountsInput methods."""
+    import typing
+    from main import CountsInput
+
+    hints = typing.get_type_hints(CountsInput.validate_counts_dict)
+    assert hints.get("val") is typing.Any
+    assert hints.get("return") == dict[str, int]

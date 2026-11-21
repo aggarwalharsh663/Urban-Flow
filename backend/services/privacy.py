@@ -68,6 +68,16 @@ def redact_frame_for_cloud(
     if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
         raise PrivacyRedactionError("Invalid image frame for privacy redaction.")
 
+    try:
+        try:
+            from services.detection import get_inference_lock
+        except ImportError:
+            from backend.services.detection import get_inference_lock
+        inference_lock = get_inference_lock()
+    except Exception:
+        import contextlib
+        inference_lock = contextlib.nullcontext()
+
     if model is None:
         try:
             from services.detection import _get_model
@@ -84,13 +94,14 @@ def redact_frame_for_cloud(
 
     # COCO classes: 0: person, 2: car, 3: motorcycle, 5: bus, 7: truck
     try:
-        results = model.predict(
-            frame,
-            verbose=False,
-            classes=[0, 2, 3, 5, 7],
-            conf=0.10,
-            imgsz=min(1280, max(w, h)),
-        )[0]
+        with inference_lock:
+            results = model.predict(
+                frame,
+                verbose=False,
+                classes=[0, 2, 3, 5, 7],
+                conf=0.10,
+                imgsz=min(1280, max(w, h)),
+            )[0]
     except Exception as e:
         logger.error("YOLO privacy scan failed: %s", e)
         raise PrivacyRedactionError(f"Privacy scan failed: {e}") from e

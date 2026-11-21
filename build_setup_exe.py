@@ -11,10 +11,35 @@ import sys
 import zipfile
 from pathlib import Path
 
-SOURCE_DIR = Path(r"C:\Users\HARSH AGGARWAL\AppData\Local\Programs\Urban Flow")
-WORK_DIR = Path(r"C:\Users\HARSH AGGARWAL\.gemini\antigravity\scratch\Urban-Flow")
+WORK_DIR = Path(__file__).resolve().parent
+
+# Check for installation in LocalAppData or fallback to WORK_DIR
+LOCALAPPDATA = os.getenv("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+candidate_source = Path(LOCALAPPDATA) / "Programs" / "Urban Flow"
+SOURCE_DIR = candidate_source if candidate_source.is_dir() else WORK_DIR
+
+# Determine output directory (Desktop or current work dir)
+desktop_candidate = Path(os.getenv("USERPROFILE", str(Path.home()))) / "Desktop"
+onedrive_desktop = Path(os.getenv("USERPROFILE", str(Path.home()))) / "OneDrive" / "Desktop"
+if onedrive_desktop.is_dir():
+    DESKTOP = onedrive_desktop
+elif desktop_candidate.is_dir():
+    DESKTOP = desktop_candidate
+else:
+    DESKTOP = WORK_DIR
+
+OUT_EXE = DESKTOP / "Urban Flow Setup.exe"
+
+# 64-bit / 32-bit CSC compiler resolution
 CSC_EXE = Path(r"C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe")
-OUT_EXE = Path(r"C:\Users\HARSH AGGARWAL\OneDrive\Desktop\Urban Flow Setup.exe")
+if not CSC_EXE.is_file():
+    CSC_EXE = Path(r"C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe")
+
+for arg in sys.argv[1:]:
+    if arg.startswith("--source="):
+        SOURCE_DIR = Path(arg.split("=", 1)[1])
+    elif arg.startswith("--out="):
+        OUT_EXE = Path(arg.split("=", 1)[1])
 
 EXCLUDE_PATTERNS = [
     ".git",
@@ -39,7 +64,8 @@ def is_excluded(rel_str: str) -> bool:
 
 def main():
     payload_zip = WORK_DIR / "urban_flow_payload.zip"
-    rebuild_zip = "--rebuild-zip" in sys.argv or not payload_zip.exists() or payload_zip.stat().st_size < 100 * 1024 * 1024
+    has_source_override = any(arg.startswith("--source=") for arg in sys.argv[1:])
+    rebuild_zip = "--rebuild-zip" in sys.argv or has_source_override or not payload_zip.exists() or payload_zip.stat().st_size < 100 * 1024 * 1024
 
     if rebuild_zip:
         print("=== [1/3] Building Complete Urban Flow payload ZIP ===")

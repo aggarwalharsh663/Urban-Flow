@@ -1,9 +1,24 @@
-const { app, BrowserWindow, protocol, shell, net, ipcMain, session } = require('electron');
+/*
+ * Urban Flow - Adaptive Traffic Signal System
+ * Copyright (c) 2026 Harsh Aggarwal <aggarwalharsh663@gmail.com>. All rights reserved.
+ *
+ * Original Author & Sole Intellectual Property Owner: Harsh Aggarwal
+ * Any additions, modifications, or contributed files to this project automatically
+ * and irrevocably vest all copyright and intellectual property rights solely in Harsh Aggarwal.
+ */
+
+const { app, BrowserWindow, protocol, shell, net, ipcMain, session, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const readline = require('readline');
 const { spawn } = require('child_process');
 const crypto = require('crypto');
+const {
+  TRUSTED_EXTERNAL_DOMAINS,
+  isMatchingDomain,
+  validateExternalUrl,
+  openExternalUrl,
+} = require('./url-utils.cjs');
 
 // Register custom scheme 'app' before ready
 protocol.registerSchemesAsPrivileged([
@@ -75,6 +90,7 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 }
 
 const candidatePythons = [
+  path.join(BACKEND_DIR, 'python', 'pythonw.exe'),
   path.join(BACKEND_DIR, 'python', 'python.exe'),
   path.join(BACKEND_DIR, '.venv', 'Scripts', 'python.exe'),
   path.join(BACKEND_DIR, '.venv', 'python.exe'),
@@ -89,7 +105,7 @@ const ICON_PATH = fs.existsSync(icoPath) ? icoPath : pngPath;
 
 // --- Security Limits & AllowLists ---
 const MAX_UPLOAD_SIZE = 100 * 1024 * 1024; // 100 MB prototype limit
-const ALLOWED_UPLOAD_EXTS = new Set(['.jpg', '.jpeg', '.png', '.mp4']);
+const ALLOWED_UPLOAD_EXTS = new Set(['.jpg', '.jpeg', '.png', '.mp4', '.avi']);
 const ALLOWED_CLIENT_EXTS = new Set([
   '.html', '.js', '.mjs', '.css', '.json',
   '.png', '.jpg', '.jpeg', '.svg', '.ico',
@@ -111,6 +127,7 @@ const mimeTypes = {
   '.woff': 'font/woff',
   '.woff2': 'font/woff2',
   '.mp4': 'video/mp4',
+  '.avi': 'video/x-msvideo',
   '.txt': 'text/plain; charset=utf-8',
 };
 
@@ -219,6 +236,66 @@ function verifyMagicBytes(buffer, ext) {
     return buffer.length >= 12 && buffer.slice(0, 4).toString('latin1') === 'RIFF' && buffer.slice(8, 12).toString('latin1') === 'AVI ';
   }
   return false;
+}
+
+/**
+ * Write a buffer chunk to a writable stream honoring stream backpressure.
+ * When the internal stream buffer is full (write() returns false), pauses reading
+ * and awaits the 'drain' event or catches premature errors/closure.
+ *
+ * If the stream is already destroyed or closed on entry, rejects immediately.
+ * Registers drain/close/error listeners BEFORE calling write() so that any
+ * synchronous error emission from write() on a destroyed stream is captured.
+ */
+function writeChunkWithBackpressure(writeStream, chunk) {
+  if (writeStream.destroyed || writeStream.closed) {
+    return Promise.reject(new Error('Upload stream closed prematurely before drain.'));
+  }
+
+  // Register listeners BEFORE write() so that if the stream is destroyed
+  // between our guard check and write() — causing an immediate 'error' or
+  // 'close' event — we capture it rather than leaving it unhandled.
+  return new Promise((resolve, reject) => {
+    function onDrain() {
+      cleanup();
+      resolve();
+    }
+    function onClose() {
+      cleanup();
+      reject(new Error('Upload stream closed prematurely before drain.'));
+    }
+    function onError(err) {
+      cleanup();
+      reject(err);
+    }
+
+    function cleanup() {
+      writeStream.removeListener('drain', onDrain);
+      writeStream.removeListener('close', onClose);
+      writeStream.removeListener('error', onError);
+    }
+
+    writeStream.once('drain', onDrain);
+    writeStream.once('close', onClose);
+    writeStream.once('error', onError);
+
+    let needsDrain;
+    try {
+      needsDrain = !writeStream.write(chunk);
+    } catch (syncErr) {
+      // write() threw synchronously (some Node versions do this on destroyed streams)
+      cleanup();
+      reject(new Error('Upload stream closed prematurely before drain.'));
+      return;
+    }
+
+    // If write() returned true the buffer accepted the chunk — no drain needed
+    if (!needsDrain) {
+      cleanup();
+      resolve();
+    }
+    // else: needsDrain === true → wait for drain/close/error via registered listeners
+  });
 }
 
 // --- Portless Python IPC Bridge (stdin / stdout pipes) ---
@@ -399,52 +476,58 @@ function startPythonWorker() {
 }
 
 function sendIpcRequest(action, data = {}, timeoutMs = 30000, scope = null) {
-  return new Promise(async (resolve, reject) => {
-    if (!isWorkerReady) {
-      await Promise.race([
-        workerReadyPromise,
-        new Promise((_, r) => setTimeout(() => r(new Error('Timed out waiting for Python worker to initialize.')), 15000)),
-      ]);
-    }
+  return new Promise((resolve, reject) => {
+    const readyCheck = isWorkerReady
+      ? Promise.resolve()
+      : Promise.race([
+          workerReadyPromise,
+          new Promise((_, r) => setTimeout(() => r(new Error('Timed out waiting for Python worker to initialize.')), 15000)),
+        ]);
 
-    if (!pythonProcess || pythonProcess.killed) {
-      return reject(new Error('Python worker is not running.'));
-    }
-
-    const reqScope = scope || ACTION_SCOPES[action] || 'read';
-    const reqId = crypto.randomUUID();
-    const timer = setTimeout(() => {
-      if (pendingRequests.has(reqId)) {
-        pendingRequests.delete(reqId);
-        // Cooperative cancellation signal to worker process (R6)
-        if (pythonProcess && !pythonProcess.killed) {
-          try {
-            pythonProcess.stdin.write(JSON.stringify({
-              id: crypto.randomUUID(),
-              action: 'cancel',
-              token: IPC_SESSION_TOKEN,
-              scope: 'admin',
-              data: { cancel_id: reqId }
-            }) + '\n');
-          } catch (e) {}
+    readyCheck
+      .then(() => {
+        if (!pythonProcess || pythonProcess.killed) {
+          return reject(new Error('Python worker is not running.'));
         }
-        reject(new Error(`Request '${action}' timed out after ${timeoutMs}ms.`));
-      }
-    }, timeoutMs);
 
-    pendingRequests.set(reqId, {
-      resolve: (res) => { clearTimeout(timer); resolve(res); },
-      reject: (err) => { clearTimeout(timer); reject(err); },
-    });
+        const reqScope = scope || ACTION_SCOPES[action] || 'read';
+        const reqId = crypto.randomUUID();
+        const timer = setTimeout(() => {
+          if (pendingRequests.has(reqId)) {
+            pendingRequests.delete(reqId);
+            // Cooperative cancellation signal to worker process (R6)
+            if (pythonProcess && !pythonProcess.killed) {
+              try {
+                pythonProcess.stdin.write(JSON.stringify({
+                  id: crypto.randomUUID(),
+                  action: 'cancel',
+                  token: IPC_SESSION_TOKEN,
+                  scope: 'admin',
+                  data: { cancel_id: reqId }
+                }) + '\n');
+              } catch (e) {}
+            }
+            reject(new Error(`Request '${action}' timed out after ${timeoutMs}ms.`));
+          }
+        }, timeoutMs);
 
-    const payload = JSON.stringify({
-      id: reqId,
-      action,
-      token: IPC_SESSION_TOKEN,
-      scope: reqScope,
-      data
-    }) + '\n';
-    pythonProcess.stdin.write(payload, 'utf-8');
+        pendingRequests.set(reqId, {
+          resolve: (res) => { clearTimeout(timer); resolve(res); },
+          reject: (err) => { clearTimeout(timer); reject(err); },
+        });
+
+        const payload = JSON.stringify({
+          id: reqId,
+          action,
+          token: IPC_SESSION_TOKEN,
+          scope: reqScope,
+          data
+        }) + '\n';
+        pythonProcess.stdin.write(payload, 'utf-8');
+      })
+      .catch((err) => {
+        reject(err);
+      });
   });
 }
 
@@ -487,7 +570,8 @@ if (ipcMain) {
     if (data && JSON.stringify(data).length > 5 * 1024 * 1024) {
       throw new Error('IPC request payload exceeds maximum limit of 5 MB.');
     }
-    return sendIpcRequest(action, data || {}, 30000, requiredScope);
+    const actionTimeout = action.startsWith('analyse') ? 180000 : (action === 'simulate' ? 60000 : 30000);
+    return sendIpcRequest(action, data || {}, actionTimeout, requiredScope);
   });
 }
 
@@ -653,7 +737,7 @@ function registerProtocolHandler() {
 
         // Strict extension validation
         const ext = path.extname(file.name || '').toLowerCase();
-        const expectedExts = isVideo ? new Set(['.mp4']) : new Set(['.jpg', '.jpeg', '.png']);
+        const expectedExts = isVideo ? new Set(['.mp4', '.avi']) : new Set(['.jpg', '.jpeg', '.png']);
         if (!expectedExts.has(ext)) {
           return createErrorResponse(`Unsupported file type '${ext}'. Allowed: ${Array.from(expectedExts).join(', ')}`, 400);
         }
@@ -666,6 +750,12 @@ function registerProtocolHandler() {
         let totalBytes = 0;
         let headerChunk = null;
         let streamFailed = false;
+        let streamError = null;
+
+        writeStream.on('error', (err) => {
+          streamError = streamError || err;
+          streamFailed = true;
+        });
 
         try {
           while (true) {
@@ -684,19 +774,33 @@ function registerProtocolHandler() {
               streamFailed = true;
               break;
             }
-            writeStream.write(buf);
+            await writeChunkWithBackpressure(writeStream, buf);
           }
-          await new Promise((res, rej) => {
-            writeStream.end((err) => err ? rej(err) : res());
-          });
+
+          if (streamFailed) {
+            try { await reader.cancel(); } catch (e) {}
+            writeStream.destroy();
+          } else {
+            await new Promise((res, rej) => {
+              writeStream.end((err) => (err ? rej(err) : res()));
+            });
+          }
         } catch (streamErr) {
           streamFailed = true;
+          streamError = streamErr;
+          try { await reader.cancel(); } catch (e) {}
+          if (!writeStream.destroyed) {
+            writeStream.destroy(streamErr);
+          }
         }
 
         if (streamFailed || !headerChunk || !verifyMagicBytes(headerChunk, ext)) {
           try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch (e) {}
           if (totalBytes > MAX_UPLOAD_SIZE) {
             return createErrorResponse('Upload exceeds 100 MB limit.', 413);
+          }
+          if (streamError) {
+            log('Upload stream error:', streamError.message || streamError);
           }
           return createErrorResponse(`File content does not match expected format for ${ext}.`, 400);
         }
@@ -708,6 +812,7 @@ function registerProtocolHandler() {
             junction_name: (formData.get('junction_name') || '').trim() || null,
             green_budget: Math.max(40, Math.min(600, Number(formData.get('green_budget')) || 120)),
             yellow_seconds: Math.max(1, Math.min(10, Number(formData.get('yellow_seconds')) || 3)),
+            all_red_seconds: Math.max(0, Math.min(10, Number(formData.get('all_red_seconds')) || 0)),
             use_cloud_ai: useCloudAi,
           }, isVideo ? 60000 : 30000, 'inference:write');
 
@@ -715,9 +820,10 @@ function registerProtocolHandler() {
             headers: applySecurityHeaders({ 'content-type': 'application/json; charset=utf-8' }),
           });
         } catch (ipcErr) {
-          // Clean up temp file on failure
-          try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch (e) {}
           return createErrorResponse(ipcErr.message || 'Analysis processing failed.', mapExceptionToStatus(ipcErr));
+        } finally {
+          // Clean up temporary upload staging file now that Python worker has copied it to its managed destination
+          try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch (e) {}
         }
       }
 
@@ -757,6 +863,12 @@ function registerProtocolHandler() {
             let totalBytes = 0;
             let headerChunk = null;
             let streamFailed = false;
+            let streamError = null;
+
+            writeStream.on('error', (err) => {
+              streamError = streamError || err;
+              streamFailed = true;
+            });
 
             try {
               while (true) {
@@ -775,19 +887,33 @@ function registerProtocolHandler() {
                   streamFailed = true;
                   break;
                 }
-                writeStream.write(buf);
+                await writeChunkWithBackpressure(writeStream, buf);
               }
-              await new Promise((res, rej) => {
-                writeStream.end((err) => err ? rej(err) : res());
-              });
+
+              if (streamFailed) {
+                try { await reader.cancel(); } catch (e) {}
+                writeStream.destroy();
+              } else {
+                await new Promise((res, rej) => {
+                  writeStream.end((err) => (err ? rej(err) : res()));
+                });
+              }
             } catch (err) {
               streamFailed = true;
+              streamError = err;
+              try { await reader.cancel(); } catch (e) {}
+              if (!writeStream.destroyed) {
+                writeStream.destroy(err);
+              }
             }
 
             if (streamFailed || !headerChunk || !verifyMagicBytes(headerChunk, ext)) {
               try { if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); } catch (e) {}
               if (totalBytes > MAX_VIDEO_UPLOAD_SIZE) {
                 return createErrorResponse(`Video for ${dir} exceeds 150 MB limit.`, 413);
+              }
+              if (streamError) {
+                log(`Upload stream error for ${dir}:`, streamError.message || streamError);
               }
               return createErrorResponse(`File content for ${dir} does not match expected format for ${ext}.`, 400);
             }
@@ -813,10 +939,12 @@ function registerProtocolHandler() {
             headers: applySecurityHeaders({ 'content-type': 'application/json; charset=utf-8' }),
           });
         } catch (ipcErr) {
+          return createErrorResponse(ipcErr.message || 'Multi-video analysis failed.', mapExceptionToStatus(ipcErr));
+        } finally {
+          // Clean up directional upload staging files now that Python worker has copied them to its managed destination
           for (const f of createdFiles) {
             try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
           }
-          return createErrorResponse(ipcErr.message || 'Multi-video analysis failed.', mapExceptionToStatus(ipcErr));
         }
       }
 
@@ -1069,6 +1197,10 @@ function createWindow() {
     if (!isAllowedOrigin(navigationUrl)) {
       log('Prevented unauthorized navigation to:', navigationUrl);
       event.preventDefault();
+      // Safely handle external URL opening with validation and confirmation
+      openExternalUrl(navigationUrl, { parentWindow: mainWindow, logger: log }).catch((err) => {
+        log('Error in will-navigate external URL handling:', err && err.message ? err.message : err);
+      });
     }
   });
 
@@ -1079,14 +1211,13 @@ function createWindow() {
     }
   });
 
-  // Restrict window opening (Finding 9)
+  // Restrict window opening (Finding 9 & Navigation Security)
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    try {
-      const parsed = new URL(url);
-      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
-        shell.openExternal(url);
-      }
-    } catch (e) {}
+    // Validate external URL and prompt confirmation for untrusted domains before opening.
+    // Always deny renderer-created secondary windows to maintain single-window security model.
+    openExternalUrl(url, { parentWindow: mainWindow, logger: log }).catch((err) => {
+      log('Error in setWindowOpenHandler external URL handling:', err && err.message ? err.message : err);
+    });
     return { action: 'deny' };
   });
 
@@ -1137,11 +1268,17 @@ app.whenReady().then(async () => {
       e.preventDefault();
       log('Blocked unauthorized webview attachment.');
     });
-    contents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    contents.setWindowOpenHandler(({ url }) => {
+      const win = BrowserWindow.fromWebContents(contents) || mainWindow;
+      openExternalUrl(url, { parentWindow: win, logger: log }).catch(() => {});
+      return { action: 'deny' };
+    });
     contents.on('will-navigate', (e, navUrl) => {
       if (!isAllowedOrigin(navUrl)) {
         e.preventDefault();
         log('Blocked web-contents navigation to:', navUrl);
+        const win = BrowserWindow.fromWebContents(contents) || mainWindow;
+        openExternalUrl(navUrl, { parentWindow: win, logger: log }).catch(() => {});
       }
     });
     contents.on('will-redirect', (e, redUrl) => {
@@ -1185,6 +1322,11 @@ if (typeof module !== 'undefined' && module.exports) {
     isAllowedOrigin,
     resolveContainedPath,
     verifyMagicBytes,
+    writeChunkWithBackpressure,
     sendIpcRequest,
+    TRUSTED_EXTERNAL_DOMAINS,
+    isMatchingDomain,
+    validateExternalUrl,
+    openExternalUrl,
   };
 }

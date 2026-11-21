@@ -1,3 +1,12 @@
+/*
+ * Urban Flow - Adaptive Traffic Signal System
+ * Copyright (c) 2026 Harsh Aggarwal <aggarwalharsh663@gmail.com>. All rights reserved.
+ *
+ * Original Author & Sole Intellectual Property Owner: Harsh Aggarwal
+ * Any additions, modifications, or contributed files to this project automatically
+ * and irrevocably vest all copyright and intellectual property rights solely in Harsh Aggarwal.
+ */
+
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -279,25 +288,121 @@ namespace UrbanFlowSetup
         public static bool IsSafeZipEntry(string entryFullName, string targetDir, out string canonicalDestPath)
         {
             canonicalDestPath = null;
-            if (string.IsNullOrEmpty(entryFullName)) return false;
-            if (entryFullName.IndexOf('\0') >= 0) return false;
-            if (entryFullName.Contains("..") || entryFullName.StartsWith("/") || entryFullName.StartsWith("\\"))
-                return false;
-            if (Path.IsPathRooted(entryFullName) || entryFullName.Contains(":"))
+            if (string.IsNullOrWhiteSpace(entryFullName) || string.IsNullOrWhiteSpace(targetDir))
                 return false;
 
+            // Reject null bytes and invalid path characters
+            if (entryFullName.IndexOf('\0') >= 0 || entryFullName.IndexOfAny(Path.GetInvalidPathChars()) >= 0)
+                return false;
+
+            // Reject explicit directory traversal components (e.g. ".." as a path segment)
+            string[] segments = entryFullName.Split(new char[] { '/', '\\' }, StringSplitOptions.None);
+            foreach (string seg in segments)
+            {
+                if (seg.Trim() == "..")
+                    return false;
+            }
+
+            // Reject rooted, drive-letter, UNC, and device paths
+            if (entryFullName.StartsWith("/") || entryFullName.StartsWith("\\") || entryFullName.Contains(":"))
+                return false;
+            if (Path.IsPathRooted(entryFullName))
+                return false;
+
+            // Normalize slashes to current platform directory separator
             string normalizedEntry = entryFullName.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
-            string canonicalRoot = Path.GetFullPath(targetDir);
+
+            // Canonicalize target root and ensure trailing separator
+            string canonicalRoot;
+            try
+            {
+                canonicalRoot = Path.GetFullPath(targetDir);
+            }
+            catch
+            {
+                return false;
+            }
             if (!canonicalRoot.EndsWith(Path.DirectorySeparatorChar.ToString()))
                 canonicalRoot += Path.DirectorySeparatorChar;
 
-            string combinedPath = Path.Combine(canonicalRoot, normalizedEntry);
-            string fullDest = Path.GetFullPath(combinedPath);
-            if (!fullDest.StartsWith(canonicalRoot, StringComparison.OrdinalIgnoreCase))
+            // Combine and canonicalize destination path
+            string fullDest;
+            try
+            {
+                string combinedPath = Path.Combine(canonicalRoot, normalizedEntry);
+                fullDest = Path.GetFullPath(combinedPath);
+            }
+            catch
+            {
+                return false;
+            }
+
+            // Determine if entry is root directory itself or descendant
+            string rootWithoutTrailingSep = canonicalRoot.TrimEnd(Path.DirectorySeparatorChar);
+            bool isRoot = string.Equals(fullDest, rootWithoutTrailingSep, StringComparison.OrdinalIgnoreCase);
+            bool isDescendant = fullDest.StartsWith(canonicalRoot, StringComparison.OrdinalIgnoreCase);
+
+            bool isDirectoryEntry = entryFullName.EndsWith("/") || entryFullName.EndsWith("\\");
+            if (!isDescendant && !(isRoot && isDirectoryEntry))
                 return false;
 
             canonicalDestPath = fullDest;
             return true;
+        }
+
+        public static bool HasReparsePointInPath(string fullPath, string rootDir)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(fullPath) || string.IsNullOrWhiteSpace(rootDir))
+                    return true;
+
+                string canonicalRoot = Path.GetFullPath(rootDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string canonicalTarget = Path.GetFullPath(fullPath);
+
+                if (File.Exists(canonicalTarget))
+                {
+                    FileInfo fi = new FileInfo(canonicalTarget);
+                    if ((fi.Attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        return true;
+                    }
+                }
+
+                string checkPath = canonicalTarget;
+                while (!string.IsNullOrEmpty(checkPath) && !File.Exists(checkPath) && !Directory.Exists(checkPath))
+                {
+                    checkPath = Path.GetDirectoryName(checkPath);
+                }
+
+                if (string.IsNullOrEmpty(checkPath))
+                {
+                    checkPath = canonicalRoot;
+                }
+
+                DirectoryInfo current = File.Exists(checkPath)
+                    ? new DirectoryInfo(Path.GetDirectoryName(checkPath))
+                    : new DirectoryInfo(checkPath);
+
+                while (current != null)
+                {
+                    if ((current.Attributes & FileAttributes.ReparsePoint) != 0)
+                    {
+                        return true;
+                    }
+                    if (string.Equals(current.FullName.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar), canonicalRoot, StringComparison.OrdinalIgnoreCase))
+                    {
+                        break;
+                    }
+                    current = current.Parent;
+                }
+
+                return false;
+            }
+            catch
+            {
+                return true;
+            }
         }
 
         private static void CloseExistingProcesses(string targetDir)
@@ -439,7 +544,7 @@ namespace UrbanFlowSetup
             worker.Start();
         }
 
-        public static bool PerformInstallationCore(string targetDir, bool createShortcut, bool launch, Action<int, string> progress)
+        public static bool PerformInstallationCore(string targetDir, bool createShortcut, bool launch, Action<int, string> progress, bool silent = false)
         {
             string logFile = Path.Combine(targetDir, "install.log");
             try
@@ -470,6 +575,20 @@ namespace UrbanFlowSetup
 
                     using (ZipArchive archive = new ZipArchive(zipStream, ZipArchiveMode.Read))
                     {
+                        // Validate all entries before extraction
+                        foreach (ZipArchiveEntry entry in archive.Entries)
+                        {
+                            string checkDest;
+                            if (!IsSafeZipEntry(entry.FullName, targetDir, out checkDest))
+                            {
+                                throw new Exception(string.Format("Installation payload contains invalid entry: {0}", entry.FullName));
+                            }
+                            if (HasReparsePointInPath(checkDest, targetDir))
+                            {
+                                throw new Exception(string.Format("Installation target lies beneath a directory junction or reparse point: {0}", entry.FullName));
+                            }
+                        }
+
                         int total = archive.Entries.Count;
                         int count = 0;
 
@@ -477,7 +596,7 @@ namespace UrbanFlowSetup
                         {
                             count++;
                             string fullDestPath;
-                            if (!IsSafeZipEntry(entry.FullName, targetDir, out fullDestPath))
+                            if (!IsSafeZipEntry(entry.FullName, targetDir, out fullDestPath) || HasReparsePointInPath(fullDestPath, targetDir))
                             {
                                 continue;
                             }
@@ -596,7 +715,7 @@ namespace UrbanFlowSetup
 
                 if (launch)
                 {
-                    LaunchApp(targetDir);
+                    LaunchApp(targetDir, silent);
                 }
 
                 return true;
@@ -613,38 +732,126 @@ namespace UrbanFlowSetup
             }
         }
 
+        public static bool LocateElectron(string baseDir, out string electronExe, out string frontendDir)
+        {
+            electronExe = null;
+            frontendDir = null;
+
+            if (!string.IsNullOrWhiteSpace(baseDir))
+            {
+                string localFrontend = Path.Combine(baseDir, "frontend");
+                string localElectron = Path.Combine(localFrontend, "node_modules", "electron", "dist", "electron.exe");
+                if (File.Exists(localElectron) && Directory.Exists(localFrontend))
+                {
+                    electronExe = Path.GetFullPath(localElectron);
+                    frontendDir = Path.GetFullPath(localFrontend);
+                    return true;
+                }
+
+                string directElectron = Path.Combine(baseDir, "node_modules", "electron", "dist", "electron.exe");
+                if (File.Exists(directElectron) && Directory.Exists(baseDir))
+                {
+                    electronExe = Path.GetFullPath(directElectron);
+                    frontendDir = Path.GetFullPath(baseDir);
+                    return true;
+                }
+
+                // If base directory was specified, restrict lookup to this installation
+                return false;
+            }
+
+            string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+            if (!string.IsNullOrEmpty(progFiles))
+            {
+                string pfFrontend = Path.Combine(progFiles, "Urban Flow", "frontend");
+                string pfElectron = Path.Combine(pfFrontend, "node_modules", "electron", "dist", "electron.exe");
+                if (File.Exists(pfElectron))
+                {
+                    electronExe = Path.GetFullPath(pfElectron);
+                    frontendDir = Path.GetFullPath(pfFrontend);
+                    return true;
+                }
+            }
+
+            string progFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+            if (!string.IsNullOrEmpty(progFilesX86))
+            {
+                string pfx86Frontend = Path.Combine(progFilesX86, "Urban Flow", "frontend");
+                string pfx86Electron = Path.Combine(pfx86Frontend, "node_modules", "electron", "dist", "electron.exe");
+                if (File.Exists(pfx86Electron))
+                {
+                    electronExe = Path.GetFullPath(pfx86Electron);
+                    frontendDir = Path.GetFullPath(pfx86Frontend);
+                    return true;
+                }
+            }
+
+            string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if (!string.IsNullOrEmpty(localAppData))
+            {
+                string appDataFrontend = Path.Combine(localAppData, "Programs", "Urban Flow", "frontend");
+                string appDataElectron = Path.Combine(appDataFrontend, "node_modules", "electron", "dist", "electron.exe");
+                if (File.Exists(appDataElectron))
+                {
+                    electronExe = Path.GetFullPath(appDataElectron);
+                    frontendDir = Path.GetFullPath(appDataFrontend);
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public static bool LaunchElectron(string baseDir, string extraArgs = null)
+        {
+            string electronExe, frontendDir;
+            if (!LocateElectron(baseDir, out electronExe, out frontendDir))
+            {
+                return false;
+            }
+
+            UnblockFile(electronExe);
+
+            ProcessStartInfo psi = new ProcessStartInfo();
+            psi.FileName = electronExe;
+            string arguments = "\"" + frontendDir + "\"";
+            if (!string.IsNullOrWhiteSpace(extraArgs))
+            {
+                arguments += " " + extraArgs.Trim();
+            }
+            psi.Arguments = arguments;
+            psi.WorkingDirectory = frontendDir;
+            psi.WindowStyle = ProcessWindowStyle.Normal;
+            psi.CreateNoWindow = false;
+            psi.UseShellExecute = true;
+
+            Process.Start(psi);
+            return true;
+        }
+
         private static void CreateShortcuts(string targetDir)
         {
             try
             {
                 string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
                 string shortcutPath = Path.Combine(desktopPath, "Urban Flow.lnk");
-                string exePath = Path.Combine(targetDir, "Urban Flow.exe");
-                string electronExe = Path.Combine(targetDir, "frontend", "node_modules", "electron", "dist", "electron.exe");
-                string frontendDir = Path.Combine(targetDir, "frontend");
                 string iconPath = Path.Combine(targetDir, "frontend", "public", "favicon.ico");
+
+                string electronExe, frontendDir;
+                if (!LocateElectron(targetDir, out electronExe, out frontendDir))
+                {
+                    frontendDir = Path.Combine(targetDir, "frontend");
+                    electronExe = Path.Combine(frontendDir, "node_modules", "electron", "dist", "electron.exe");
+                }
 
                 IShellLinkW link = (IShellLinkW)new ShellLink();
                 link.SetDescription("Urban Flow - Adaptive Traffic Signal System");
-
-                if (File.Exists(electronExe))
+                link.SetPath(electronExe);
+                link.SetArguments("\"" + frontendDir + "\"");
+                link.SetWorkingDirectory(frontendDir);
+                if (File.Exists(iconPath))
                 {
-                    link.SetPath(electronExe);
-                    link.SetArguments("\"" + frontendDir + "\"");
-                    link.SetWorkingDirectory(frontendDir);
-                    if (File.Exists(iconPath))
-                    {
-                        link.SetIconLocation(iconPath, 0);
-                    }
-                }
-                else if (File.Exists(exePath))
-                {
-                    link.SetPath(exePath);
-                    link.SetWorkingDirectory(targetDir);
-                    if (File.Exists(iconPath))
-                    {
-                        link.SetIconLocation(iconPath, 0);
-                    }
+                    link.SetIconLocation(iconPath, 0);
                 }
 
                 IPersistFile file = (IPersistFile)link;
@@ -657,38 +864,71 @@ namespace UrbanFlowSetup
                     file.Save(startMenuShortcut, false);
                 }
             }
-            catch { }
+            catch
+            {
+                try
+                {
+                    // Fallback to PowerShell WScript.Shell shortcut creation if COM interop fails
+                    string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                    string shortcutPath = Path.Combine(desktopPath, "Urban Flow.lnk");
+                    string electronExe, frontendDir;
+                    if (!LocateElectron(targetDir, out electronExe, out frontendDir))
+                    {
+                        frontendDir = Path.Combine(targetDir, "frontend");
+                        electronExe = Path.Combine(frontendDir, "node_modules", "electron", "dist", "electron.exe");
+                    }
+                    string psScript = string.Format(
+                        "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('{0}'); $s.TargetPath = '{1}'; $s.Arguments = '\"{2}\"'; $s.WorkingDirectory = '{2}'; $s.Save()",
+                        shortcutPath.Replace("'", "''"),
+                        electronExe.Replace("'", "''"),
+                        frontendDir.Replace("'", "''")
+                    );
+                    string encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(psScript));
+                    ProcessStartInfo psi = new ProcessStartInfo("powershell", "-NoProfile -NonInteractive -EncodedCommand " + encodedCommand);
+                    psi.CreateNoWindow = true;
+                    psi.UseShellExecute = false;
+                    Process p = Process.Start(psi);
+                    if (p != null) p.WaitForExit(3000);
+                }
+                catch { }
+            }
         }
 
-        private static void LaunchApp(string targetDir)
+        private static void LaunchApp(string targetDir, bool silent = false)
         {
             try
             {
-                string exePath = Path.Combine(targetDir, "Urban Flow.exe");
-                string electronExe = Path.Combine(targetDir, "frontend", "node_modules", "electron", "dist", "electron.exe");
-                string frontendDir = Path.Combine(targetDir, "frontend");
-
-                if (File.Exists(electronExe))
+                if (!LaunchElectron(targetDir))
                 {
-                    Process.Start(new ProcessStartInfo
+                    string msg = "Urban Flow installation completed, but the Electron runtime was not found at:\n" +
+                        Path.Combine(targetDir, "frontend", "node_modules", "electron", "dist", "electron.exe") +
+                        "\n\nPlease verify your installation directory or run setup again.";
+                    if (!silent)
                     {
-                        FileName = electronExe,
-                        Arguments = "\"" + frontendDir + "\"",
-                        WorkingDirectory = frontendDir,
-                        UseShellExecute = true
-                    });
-                }
-                else if (File.Exists(exePath))
-                {
-                    Process.Start(new ProcessStartInfo
+                        MessageBox.Show(
+                            msg,
+                            "Urban Flow - Missing Application Runtime",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning
+                        );
+                    }
+                    else
                     {
-                        FileName = exePath,
-                        WorkingDirectory = targetDir,
-                        UseShellExecute = true
-                    });
+                        Console.Error.WriteLine(msg);
+                    }
                 }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                if (!silent)
+                {
+                    MessageBox.Show("Unable to launch Urban Flow:\n\n" + ex.Message, "Launch Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                else
+                {
+                    Console.Error.WriteLine("Unable to launch Urban Flow: " + ex.Message);
+                }
+            }
         }
 
         [STAThread]
@@ -736,7 +976,7 @@ namespace UrbanFlowSetup
                 bool ok = PerformInstallationCore(targetPath, true, !disableLaunch, (pct, status) =>
                 {
                     try { Console.WriteLine(string.Format("[{0}%] {1}", pct, status)); } catch { }
-                });
+                }, true);
 
                 Environment.Exit(ok ? 0 : 1);
                 return;

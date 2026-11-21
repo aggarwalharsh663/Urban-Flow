@@ -3,6 +3,8 @@ backend/python/
 backend/.venv/
 frontend/node_modules/
 frontend/dist/
+frontend/.output/
+.output/
 
 # Large binaries & model weights
 backend/yolov8m.pt

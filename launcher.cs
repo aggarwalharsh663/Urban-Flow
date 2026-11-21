@@ -1,3 +1,12 @@
+/*
+ * Urban Flow - Adaptive Traffic Signal System
+ * Copyright (c) 2026 Harsh Aggarwal <aggarwalharsh663@gmail.com>. All rights reserved.
+ *
+ * Original Author & Sole Intellectual Property Owner: Harsh Aggarwal
+ * Any additions, modifications, or contributed files to this project automatically
+ * and irrevocably vest all copyright and intellectual property rights solely in Harsh Aggarwal.
+ */
+
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -87,15 +96,28 @@ namespace UrbanFlowLauncher
             catch { }
         }
 
-        private static string LocateElectronExecutable(string baseDir, out string workingDir)
+        public static bool LocateElectron(string baseDir, out string electronExe, out string frontendDir)
         {
-            // 1. Direct local bundle relative to running launcher (portable / root execution)
-            string localFrontend = Path.Combine(baseDir, "frontend");
-            string localElectron = Path.Combine(localFrontend, "node_modules", "electron", "dist", "electron.exe");
-            if (File.Exists(localElectron))
+            electronExe = null;
+            frontendDir = null;
+            if (!string.IsNullOrWhiteSpace(baseDir))
             {
-                workingDir = localFrontend;
-                return localElectron;
+                string localFrontend = Path.Combine(baseDir, "frontend");
+                string localElectron = Path.Combine(localFrontend, "node_modules", "electron", "dist", "electron.exe");
+                if (File.Exists(localElectron) && Directory.Exists(localFrontend))
+                {
+                    electronExe = Path.GetFullPath(localElectron);
+                    frontendDir = Path.GetFullPath(localFrontend);
+                    return true;
+                }
+
+                string directElectron = Path.Combine(baseDir, "node_modules", "electron", "dist", "electron.exe");
+                if (File.Exists(directElectron) && Directory.Exists(baseDir))
+                {
+                    electronExe = Path.GetFullPath(directElectron);
+                    frontendDir = Path.GetFullPath(baseDir);
+                    return true;
+                }
             }
 
             // 2. Program Files (Machine-wide installation trusted by AppLocker / Software Restriction Policies)
@@ -106,8 +128,9 @@ namespace UrbanFlowLauncher
                 string pfElectron = Path.Combine(pfFrontend, "node_modules", "electron", "dist", "electron.exe");
                 if (File.Exists(pfElectron))
                 {
-                    workingDir = pfFrontend;
-                    return pfElectron;
+                    electronExe = Path.GetFullPath(pfElectron);
+                    frontendDir = Path.GetFullPath(pfFrontend);
+                    return true;
                 }
             }
 
@@ -119,8 +142,9 @@ namespace UrbanFlowLauncher
                 string pfx86Electron = Path.Combine(pfx86Frontend, "node_modules", "electron", "dist", "electron.exe");
                 if (File.Exists(pfx86Electron))
                 {
-                    workingDir = pfx86Frontend;
-                    return pfx86Electron;
+                    electronExe = Path.GetFullPath(pfx86Electron);
+                    frontendDir = Path.GetFullPath(pfx86Frontend);
+                    return true;
                 }
             }
 
@@ -130,12 +154,47 @@ namespace UrbanFlowLauncher
             string appDataElectron = Path.Combine(appDataFrontend, "node_modules", "electron", "dist", "electron.exe");
             if (File.Exists(appDataElectron))
             {
-                workingDir = appDataFrontend;
-                return appDataElectron;
+                electronExe = Path.GetFullPath(appDataElectron);
+                frontendDir = Path.GetFullPath(appDataFrontend);
+                return true;
             }
 
-            workingDir = localFrontend;
-            return null;
+            return false;
+        }
+
+        public static bool LaunchElectron(string baseDir, string extraArgs = null)
+        {
+            string electronExe, frontendDir;
+            if (!LocateElectron(baseDir, out electronExe, out frontendDir))
+            {
+                return false;
+            }
+
+            UnblockFile(electronExe);
+
+            try
+            {
+                string nodeModules = Path.Combine(frontendDir, "node_modules");
+                UnblockDirectory(nodeModules, "*.node");
+                UnblockDirectory(nodeModules, "*.exe");
+            }
+            catch { }
+
+            ProcessStartInfo psi = new ProcessStartInfo();
+            psi.FileName = electronExe;
+            string arguments = "\"" + frontendDir + "\"";
+            if (!string.IsNullOrWhiteSpace(extraArgs))
+            {
+                arguments += " " + extraArgs.Trim();
+            }
+            psi.Arguments = arguments;
+            psi.WorkingDirectory = frontendDir;
+            psi.WindowStyle = ProcessWindowStyle.Normal;
+            psi.CreateNoWindow = false;
+            psi.UseShellExecute = true;
+
+            Process.Start(psi);
+            return true;
         }
 
         [STAThread]
@@ -166,10 +225,8 @@ namespace UrbanFlowLauncher
                     }
                     catch { }
 
-                    string workingDir;
-                    string electronExe = LocateElectronExecutable(appDir, out workingDir);
-
-                    if (string.IsNullOrEmpty(electronExe) || !File.Exists(electronExe))
+                    string electronExe, workingDir;
+                    if (!LocateElectron(appDir, out electronExe, out workingDir))
                     {
                         // Search for Urban Flow Setup.exe in nearby locations
                         string parentDir = null;
@@ -216,9 +273,9 @@ namespace UrbanFlowLauncher
                         }
 
                         MessageBox.Show(
-                            "Urban Flow is not yet installed on this computer.\n\n" +
-                            "To install: Please run 'Urban Flow Setup.exe' (the ~580 MB standalone installer).\n\n" +
-                            "Note: 'Urban Flow.exe' is the application launcher and runs once setup is completed.",
+                            "Urban Flow requires the bundled Electron runtime to run securely with Smart App Control.\n\n" +
+                            "The runtime was not found at:\n" + Path.Combine(appDir, "frontend", "node_modules", "electron", "dist", "electron.exe") + "\n\n" +
+                            "Please run 'Urban Flow Setup.exe' to install or repair the application.",
                             "Urban Flow Setup Required",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Information
@@ -226,36 +283,15 @@ namespace UrbanFlowLauncher
                         return;
                     }
 
-                    // Unblock Electron executable before launch
-                    UnblockFile(electronExe);
-
-                    // Unblock native binaries and node addons in workingDir (prevents Windows SmartScreen warnings)
-                    try
-                    {
-                        string nodeModules = Path.Combine(workingDir, "node_modules");
-                        UnblockDirectory(nodeModules, "*.node");
-                        UnblockDirectory(nodeModules, "*.exe");
-                    }
-                    catch { }
-
-                    // Build arguments forwarding
-                    string forwardArgs = ".";
+                    string forwardArgs = null;
                     if (args != null && args.Length > 0)
                     {
-                        forwardArgs = ". " + string.Join(" ", args);
+                        forwardArgs = string.Join(" ", args);
                     }
 
-                    ProcessStartInfo psi = new ProcessStartInfo();
-                    psi.FileName = electronExe;
-                    psi.Arguments = forwardArgs;
-                    psi.WorkingDirectory = workingDir;
-                    psi.WindowStyle = ProcessWindowStyle.Normal;
-                    psi.CreateNoWindow = false;
-                    psi.UseShellExecute = false;
-
-                    using (Process child = Process.Start(psi))
+                    if (!LaunchElectron(workingDir, forwardArgs))
                     {
-                        // Clean launch handoff
+                        throw new Exception("Failed to start Electron process from: " + electronExe);
                     }
                 }
                 catch (Exception ex)

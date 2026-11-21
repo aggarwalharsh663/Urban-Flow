@@ -9,8 +9,10 @@
 
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 
-const FRONTEND_DIR = 'C:\\Users\\HARSH AGGARWAL\\.gemini\\antigravity\\scratch\\Urban-Flow\\frontend';
+const __filename = fileURLToPath(import.meta.url);
+const FRONTEND_DIR = path.dirname(__filename);
 const OUTPUT_PUBLIC = path.join(FRONTEND_DIR, '.output', 'public');
 const DIST_CLIENT = path.join(FRONTEND_DIR, 'dist', 'client');
 const SERVER_MJS = path.join(FRONTEND_DIR, '.output', 'server', 'index.mjs');

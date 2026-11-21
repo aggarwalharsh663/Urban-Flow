@@ -14,6 +14,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from typing import Callable, Optional
 
 import cv2
 import numpy as np
@@ -23,6 +24,7 @@ try:
         MAX_IMAGE_WIDTH,
         MAX_IMAGE_HEIGHT,
         MAX_IMAGE_PIXELS,
+        OperationCancelledError,
         verify_model_integrity,
     )
 except ImportError:
@@ -30,6 +32,7 @@ except ImportError:
         MAX_IMAGE_WIDTH,
         MAX_IMAGE_HEIGHT,
         MAX_IMAGE_PIXELS,
+        OperationCancelledError,
         verify_model_integrity,
     )
 
@@ -505,23 +508,40 @@ def _write_annotated_frame(frame, detections: list[dict], output_path: Path) -> 
         raise RuntimeError("Could not save the annotated frame.")
 
 
-def _detect(frame: np.ndarray, output_dir: Path, filename: str) -> dict:
+def _detect(
+    frame: np.ndarray,
+    output_dir: Path,
+    filename: str,
+    cancellation_check: Optional[Callable[[], bool]] = None,
+) -> dict:
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Detection was cancelled before inference.")
+
     height, width = frame.shape[:2]
     model = _get_model()
     is_grid = _is_quad_cctv_grid(frame)
     candidates = []
     total_pedestrians = 0
 
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Detection was cancelled before model predict.")
+
     if is_grid:
         # 4-camera CCTV layout:
         # Full-frame inference with road ROI perspective filtering
-        full_res = model.predict(
-            frame,
-            verbose=False,
-            classes=DETECTION_CLASS_IDS,
-            conf=0.08,
-            imgsz=1280,
-        )[0]
+        with get_inference_lock():
+            if cancellation_check and cancellation_check():
+                raise OperationCancelledError("Detection was cancelled while acquiring inference lock.")
+            full_res = model.predict(
+                frame,
+                verbose=False,
+                classes=DETECTION_CLASS_IDS,
+                conf=0.08,
+                imgsz=1280,
+            )[0]
+
+        if cancellation_check and cancellation_check():
+            raise OperationCancelledError("Detection was cancelled after YOLO inference.")
 
         people = []
         for b in full_res.boxes:
@@ -582,13 +602,22 @@ def _detect(frame: np.ndarray, output_dir: Path, filename: str) -> dict:
     else:
         # Single aerial intersection view:
         # High resolution multi-scale inference with sensitive detection for dark / small vehicles
-        full_res = model.predict(
-            frame,
-            verbose=False,
-            classes=DETECTION_CLASS_IDS,
-            conf=0.10,
-            imgsz=1280,
-        )[0]
+        if cancellation_check and cancellation_check():
+            raise OperationCancelledError("Detection was cancelled before aerial inference.")
+
+        with get_inference_lock():
+            if cancellation_check and cancellation_check():
+                raise OperationCancelledError("Detection was cancelled while acquiring inference lock.")
+            full_res = model.predict(
+                frame,
+                verbose=False,
+                classes=DETECTION_CLASS_IDS,
+                conf=0.10,
+                imgsz=1280,
+            )[0]
+
+        if cancellation_check and cancellation_check():
+            raise OperationCancelledError("Detection was cancelled after YOLO aerial inference.")
 
         for b in full_res.boxes:
             cls_id = int(b.cls[0].item())
@@ -646,6 +675,9 @@ def _detect(frame: np.ndarray, output_dir: Path, filename: str) -> dict:
                 "box": coords,
             })
 
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Detection was cancelled before duplicate suppression.")
+
     # Class-agnostic duplicate suppression
     accepted: list[dict] = []
     for cand in sorted(candidates, key=lambda item: item["confidence"], reverse=True):
@@ -656,6 +688,9 @@ def _detect(frame: np.ndarray, output_dir: Path, filename: str) -> dict:
     counts = {direction: 0 for direction in DIRECTIONS}
     for det in accepted:
         counts[det["direction"]] += 1
+
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Detection was cancelled before writing annotated image.")
 
     _write_annotated_frame(frame, accepted, output_dir / filename)
     mode_text = "4-camera CCTV approach analysis" if is_grid else "aerial intersection analysis"
@@ -671,16 +706,32 @@ def _detect(frame: np.ndarray, output_dir: Path, filename: str) -> dict:
     }
 
 
-def analyse_image(image_path: Path, output_dir: Path) -> dict:
+def analyse_image(
+    image_path: Path,
+    output_dir: Path,
+    cancellation_check: Optional[Callable[[], bool]] = None,
+) -> dict:
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Image analysis was cancelled before opening.")
     _get_model()
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Image analysis was cancelled before reading image.")
     frame = cv2.imread(str(image_path))
     if frame is None:
         raise ValueError("OpenCV could not read this image. Try a valid JPG or PNG file.")
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Image analysis was cancelled after reading image.")
     h, w = frame.shape[:2]
     if h > MAX_IMAGE_HEIGHT or w > MAX_IMAGE_WIDTH or (h * w) > MAX_IMAGE_PIXELS:
         raise ValueError(f"Image dimensions ({w}x{h}) exceed safety limits.")
     annotated_filename = f"{image_path.stem}-annotated.jpg"
-    result = _detect(frame, output_dir, annotated_filename)
+    result = _detect(frame, output_dir, annotated_filename, cancellation_check=cancellation_check)
+    if cancellation_check and cancellation_check():
+        try:
+            (output_dir / annotated_filename).unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise OperationCancelledError("Image analysis was cancelled before returning result.")
     return {
         **result,
         "annotated_filename": annotated_filename,
@@ -692,30 +743,57 @@ def analyse_image(image_path: Path, output_dir: Path) -> dict:
     }
 
 
-def analyse_video(video_path: Path, output_dir: Path) -> dict:
+def analyse_video(
+    video_path: Path,
+    output_dir: Path,
+    cancellation_check: Optional[Callable[[], bool]] = None,
+) -> dict:
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Video analysis was cancelled before opening.")
     _get_model()
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Video analysis was cancelled before opening video capture.")
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
-        raise ValueError("OpenCV could not open this MP4 video.")
+        ext_label = video_path.suffix.upper().lstrip(".") or "video"
+        raise ValueError(f"OpenCV could not open this {ext_label} video.")
     try:
+        if cancellation_check and cancellation_check():
+            raise OperationCancelledError("Video analysis was cancelled during capture initialization.")
         frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = capture.get(cv2.CAP_PROP_FPS)
         if frame_count <= 0 or fps <= 0:
             raise ValueError("The video does not contain readable frames.")
 
+        if cancellation_check and cancellation_check():
+            raise OperationCancelledError("Video analysis was cancelled before frame seeking.")
+
         capture.set(cv2.CAP_PROP_POS_FRAMES, frame_count // 2)
+
+        if cancellation_check and cancellation_check():
+            raise OperationCancelledError("Video analysis was cancelled before frame reading.")
+
         success, frame = capture.read()
         if not success or frame is None:
             raise ValueError("Could not read a representative frame from the video.")
     finally:
         capture.release()
 
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Video analysis was cancelled after frame decoding.")
+
     h, w = frame.shape[:2]
     if h > MAX_IMAGE_HEIGHT or w > MAX_IMAGE_WIDTH or (h * w) > MAX_IMAGE_PIXELS:
         raise ValueError(f"Video frame dimensions ({w}x{h}) exceed safety limits.")
 
     annotated_filename = f"{video_path.stem}-annotated.jpg"
-    result = _detect(frame, output_dir, annotated_filename)
+    result = _detect(frame, output_dir, annotated_filename, cancellation_check=cancellation_check)
+    if cancellation_check and cancellation_check():
+        try:
+            (output_dir / annotated_filename).unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise OperationCancelledError("Video analysis was cancelled before returning result.")
     note = (
         "Video analysis uses a representative middle-frame snapshot; vehicles are not tracked across frames. "
         if result["total_count"]

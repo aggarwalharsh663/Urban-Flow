@@ -35,6 +35,11 @@ from PIL import Image
 # Setup security logger
 logger = logging.getLogger("urban_flow.security")
 
+
+class OperationCancelledError(RuntimeError):
+    """Raised when an operation is cooperatively cancelled before or during execution."""
+    pass
+
 # Base directory references
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -68,6 +73,20 @@ def get_writable_data_dir() -> Path:
 
 DATA_DIR = get_writable_data_dir()
 TOKEN_FILE = DATA_DIR / ".urban_flow_token"
+
+
+def resolve_data_dir() -> Path:
+    """
+    Return the current effective writable data directory.
+    Prioritizes URBAN_FLOW_DATA_DIR environment variable, followed by module-level DATA_DIR,
+    falling back to get_writable_data_dir().
+    """
+    custom = os.getenv("URBAN_FLOW_DATA_DIR", "").strip()
+    if custom:
+        p = Path(custom).resolve()
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    return DATA_DIR
 
 # --- Security Constants ---
 MAX_UPLOAD_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB standard upload size (photos)
@@ -207,7 +226,13 @@ def secure_file_permissions(path: Path):
         return
     if sys.platform == "win32":
         try:
-            username = os.environ.get("USERNAME")
+            username = os.environ.get("USERNAME") or os.environ.get("USER")
+            if not username:
+                try:
+                    import getpass
+                    username = getpass.getuser()
+                except Exception:
+                    username = None
             if username:
                 perm = f"{username}:(OI)(CI)(F)" if path.is_dir() else f"{username}:(R,W)"
                 subprocess.run(
@@ -463,6 +488,9 @@ def verify_magic_bytes(header: bytes, ext: str) -> bool:
     if ext == ".mp4":
         # MP4 ISO Base Media / QuickTime files have 'ftyp' at offset 4
         return len(header) >= 8 and header[4:8] == b"ftyp"
+    if ext == ".avi":
+        # RIFF AVI container: starts with 'RIFF' at 0..4 and 'AVI ' at 8..12
+        return len(header) >= 12 and header[:4] == b"RIFF" and header[8:12] == b"AVI "
     return False
 
 
@@ -516,7 +544,7 @@ def validate_video_file(path: Path) -> tuple[int, int, float, int]:
         header = f.read(32)
     ext = path.suffix.lower()
     if not verify_magic_bytes(header, ext):
-        raise ValueError(f"File magic signature does not match MP4 video container. Fake or malformed file.")
+        raise ValueError(f"File magic signature does not match {ext.upper().lstrip('.')} video container. Fake or malformed file.")
 
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -680,11 +708,21 @@ class ProcessSharedRateLimiter:
     """
 
     def __init__(self, db_path: Optional[Path] = None):
-        self.db_path = db_path or (DATA_DIR / "data" / "rate_limits.sqlite3")
         self._fallback = SlidingWindowRateLimiter()
         self._use_fallback = False
         self._lock = threading.Lock()
-        self._init_db()
+        self.db_path = None
+        try:
+            if db_path:
+                self.db_path = db_path
+            else:
+                base_data = resolve_data_dir()
+                data_folder = base_data if base_data.name == "data" else (base_data / "data")
+                self.db_path = data_folder / "rate_limits.sqlite3"
+            self._init_db()
+        except Exception as exc:
+            logger.warning("Failed to initialize SQLite rate limiter: %s. Using in-memory fallback.", exc)
+            self._use_fallback = True
 
     def _init_db(self):
         try:
@@ -903,18 +941,81 @@ def _is_safe_path(base_dir: Path, target: Path) -> bool:
         return False
 
 
+def get_default_tracked_dirs(
+    upload_dir: Optional[Path] = None,
+    report_dir: Optional[Path] = None,
+    data_dir: Optional[Path] = None,
+) -> list[Path]:
+    """
+    Return the list of directories to include in storage quota accounting.
+    Includes upload directory, report directory, and resolved data directories.
+    Avoids duplicate directories to prevent double counting.
+    """
+    base_data = resolve_data_dir()
+    up = upload_dir or (base_data / "uploads")
+    rep = report_dir or (base_data / "reports")
+
+    # Resolve effective data directory:
+    # 1. Explicit data_dir argument if provided
+    # 2. If upload_dir was custom and has a sibling data/ directory, include it
+    # 3. base_data / "data" by default
+    if data_dir is not None:
+        dt = data_dir
+    elif upload_dir is not None and (upload_dir.parent / "data").is_dir() and upload_dir.parent != base_data:
+        dt = upload_dir.parent / "data"
+    else:
+        dt = base_data if base_data.name == "data" else (base_data / "data")
+
+    dirs: list[Path] = [up, rep, dt]
+
+    # Also include base_data if it is distinct from up, rep, dt and exists
+    # (e.g. SQLite DBs or caches stored directly in %LOCALAPPDATA%\Urban Flow\data)
+    seen: set[Path] = set()
+    for d in (up, rep, dt):
+        try:
+            seen.add(d.resolve())
+        except Exception:
+            seen.add(d)
+
+    try:
+        base_resolved = base_data.resolve()
+        code_resolved = BASE_DIR.resolve()
+    except Exception:
+        base_resolved = base_data
+        code_resolved = BASE_DIR
+
+    # Only include base_data root if it is redirected (not the source code root BASE_DIR)
+    # and distinct from up, rep, dt
+    if base_resolved != code_resolved and base_resolved not in seen and base_data.is_dir():
+        dirs.append(base_data)
+
+    return dirs
+
+
 def calculate_storage_usage(dirs: Optional[list[Path]] = None) -> int:
     """
     Calculate actual file sizes in managed storage directories.
     Avoids counting directories, ignores external symlinks, and safely handles missing paths.
+    Deduplicates directories and physical files to prevent double counting.
     """
     if dirs is None:
-        dirs = [BASE_DIR / "uploads", BASE_DIR / "reports", BASE_DIR / "data"]
+        dirs = get_default_tracked_dirs()
 
     total = 0
+    seen_dirs: set[Path] = set()
+    seen_files: set[Path] = set()
+
     for d in dirs:
         if not d.is_dir():
             continue
+        try:
+            canonical_dir = d.resolve()
+        except Exception:
+            canonical_dir = d
+        if canonical_dir in seen_dirs:
+            continue
+        seen_dirs.add(canonical_dir)
+
         try:
             for item in d.glob("*"):
                 if not item.is_file() or item.name == ".gitkeep":
@@ -922,6 +1023,10 @@ def calculate_storage_usage(dirs: Optional[list[Path]] = None) -> int:
                 if item.is_symlink() and not _is_safe_path(d, item):
                     continue
                 try:
+                    canonical_item = item.resolve()
+                    if canonical_item in seen_files:
+                        continue
+                    seen_files.add(canonical_item)
                     total += item.stat().st_size
                 except (OSError, FileNotFoundError):
                     pass
@@ -941,16 +1046,43 @@ class StorageManager:
         upload_dir: Optional[Path] = None,
         report_dir: Optional[Path] = None,
         max_bytes: int = MAX_STORAGE_BYTES,
+        *,
+        data_dir: Optional[Path] = None,
     ):
-        self.upload_dir = upload_dir or (DATA_DIR / "uploads")
-        self.report_dir = report_dir or (DATA_DIR / "reports")
+        self._custom_upload_dir = upload_dir
+        self._custom_report_dir = report_dir
+        self._custom_data_dir = data_dir
         self.max_bytes = max_bytes
         self._lock = threading.Lock()
         self._reservations: dict[str, int] = {}
         self._active_files: set[str] = set()
 
+    @property
+    def upload_dir(self) -> Path:
+        return self._custom_upload_dir or (resolve_data_dir() / "uploads")
+
+    @upload_dir.setter
+    def upload_dir(self, value: Optional[Path]):
+        self._custom_upload_dir = value
+
+    @property
+    def report_dir(self) -> Path:
+        return self._custom_report_dir or (resolve_data_dir() / "reports")
+
+    @report_dir.setter
+    def report_dir(self, value: Optional[Path]):
+        self._custom_report_dir = value
+
+    @property
+    def data_dir(self) -> Path:
+        return self._custom_data_dir or (resolve_data_dir() / "data")
+
+    @data_dir.setter
+    def data_dir(self, value: Optional[Path]):
+        self._custom_data_dir = value
+
     def get_tracked_dirs(self) -> list[Path]:
-        return [self.upload_dir, self.report_dir, DATA_DIR / "data"]
+        return get_default_tracked_dirs(self.upload_dir, self.report_dir, self._custom_data_dir)
 
     def calculate_usage(self) -> int:
         return calculate_storage_usage(self.get_tracked_dirs())
@@ -996,13 +1128,14 @@ class StorageManager:
             current_reserved = sum(self._reservations.values())
 
             if (current_used + current_reserved + amount_bytes) > self.max_bytes:
-                # Trigger cleanup to free space
+                # Trigger cleanup to free space, accounting for current reservations
                 cleanup_storage(
                     self.upload_dir,
                     self.report_dir,
-                    target_free_bytes=amount_bytes,
+                    target_free_bytes=current_reserved + amount_bytes,
                     active_files=self._active_files,
                     max_bytes=self.max_bytes,
+                    data_dir=self._custom_data_dir,
                 )
                 current_used = self.calculate_usage()
                 if (current_used + current_reserved + amount_bytes) > self.max_bytes:
@@ -1037,6 +1170,7 @@ def cleanup_storage(
     target_free_bytes: int = 0,
     active_files: Optional[set[str]] = None,
     max_bytes: int = MAX_STORAGE_BYTES,
+    data_dir: Optional[Path] = None,
 ) -> dict[str, Any]:
     """
     Cleans up expired uploads and reports according to retention policies,
@@ -1100,7 +1234,8 @@ def cleanup_storage(
 
     # 3. If storage still exceeds MAX_STORAGE_BYTES or target_free_bytes > 0:
     # Evict oldest uploads first
-    current_total = calculate_storage_usage([upload_dir, report_dir, BASE_DIR / "data"])
+    tracked_dirs = get_default_tracked_dirs(upload_dir, report_dir, data_dir)
+    current_total = calculate_storage_usage(tracked_dirs)
     max_threshold = max_bytes - target_free_bytes
     if current_total > max_threshold and upload_dir.is_dir():
         candidate_uploads = sorted(
@@ -1123,7 +1258,7 @@ def cleanup_storage(
         "deleted_uploads": deleted_uploads,
         "deleted_reports": deleted_reports,
         "freed_bytes": freed_bytes,
-        "current_usage_bytes": calculate_storage_usage([upload_dir, report_dir, BASE_DIR / "data"]),
+        "current_usage_bytes": calculate_storage_usage(tracked_dirs),
     }
 
 

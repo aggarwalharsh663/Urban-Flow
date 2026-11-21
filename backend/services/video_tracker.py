@@ -31,6 +31,7 @@ try:
         MAX_VIDEO_FRAMES,
         MAX_VIDEO_HEIGHT,
         MAX_VIDEO_WIDTH,
+        OperationCancelledError,
         verify_magic_bytes,
     )
     from services.detection import (
@@ -51,6 +52,7 @@ except ImportError:
         MAX_VIDEO_FRAMES,
         MAX_VIDEO_HEIGHT,
         MAX_VIDEO_WIDTH,
+        OperationCancelledError,
         verify_magic_bytes,
     )
     from backend.services.detection import (
@@ -615,6 +617,9 @@ def analyse_directional_video_clip(
     if norm_dir not in DIRECTIONS:
         raise ValueError(f"Invalid direction '{direction}'. Must be one of: {', '.join(DIRECTIONS)}")
 
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError(f"Video processing cancelled during {norm_dir} analysis before opening.")
+
     orig_w, orig_h, native_fps, frame_count, duration = validate_directional_video(video_path)
 
     # Compute bounded inference resolution (e.g. max 1280px maintaining aspect ratio)
@@ -660,7 +665,7 @@ def analyse_directional_video_clip(
             return
 
         if cancellation_check and cancellation_check():
-            raise RuntimeError(f"Video processing cancelled during {norm_dir} analysis.")
+            raise OperationCancelledError(f"Video processing cancelled during {norm_dir} analysis.")
 
         # Vectorized batch YOLO inference with PyTorch inference mode (zero autograd tracking memory)
         with torch.inference_mode():
@@ -733,7 +738,7 @@ def analyse_directional_video_clip(
         f_idx = 0
         while f_idx < frame_count:
             if cancellation_check and cancellation_check():
-                raise RuntimeError(f"Video processing cancelled during {norm_dir} analysis.")
+                raise OperationCancelledError(f"Video processing cancelled during {norm_dir} analysis.")
 
             if f_idx in target_indices:
                 ret, frame = cap.read()
@@ -928,6 +933,8 @@ def analyse_multi_directional_videos(
             }
 
     if provided_approaches:
+        if cancellation_check and cancellation_check():
+            raise OperationCancelledError("Multi-directional video analysis was cancelled before starting workers.")
         configure_pytorch_threads()
         cpu_cores = os.cpu_count() or 4
         # Hardware-adaptive concurrency: on dual-core / quad-core edge devices (Core i3/i5 <= 4 cores),

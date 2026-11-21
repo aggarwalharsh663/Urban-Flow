@@ -14,10 +14,8 @@ if exist "%~dp0frontend\node_modules\electron\dist\electron.exe" (
     exit /b 0
 )
 
-if exist "%~dp0Urban Flow.exe" (
-    start "" "%~dp0Urban Flow.exe"
-    exit /b 0
-)
-
-echo [Error] Urban Flow executable not found.
+echo [Error] Bundled Electron runtime was not found at:
+echo         "%~dp0frontend\node_modules\electron\dist\electron.exe"
+echo Please verify that frontend dependencies are installed.
 pause
+exit /b 1

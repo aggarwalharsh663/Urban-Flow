@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import fs from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -170,8 +170,8 @@ function isAllowedOrigin(urlStr) {
 }
 assert.equal(isAllowedOrigin('app://urbanflow/'), true, 'app://urbanflow/ must be allowed');
 assert.equal(isAllowedOrigin('app://urbanflow/api/health'), true, 'app://urbanflow/api/health must be allowed');
-assert.equal(isAllowedOrigin('app://attacker.com/'), false, 'Foreign app:// host must be blocked');
-assert.equal(isAllowedOrigin('http://evil.com/'), false, 'External http must be blocked');
+assert.equal(isAllowedOrigin('app://foreign.example/'), false, 'Foreign app:// host must be blocked');
+assert.equal(isAllowedOrigin('http://untrusted.example/'), false, 'External http must be blocked');
 assert.equal(isAllowedOrigin('file:///etc/passwd'), false, 'file protocol must be blocked');
 assert.equal(isAllowedOrigin('javascript:alert(1)'), false, 'javascript protocol must be blocked');
 console.log('✔ Strict origin and navigation isolation verified');
@@ -200,5 +200,35 @@ console.log('✔ IPC worker session token and action scopes verified');
 assert.equal(mainContent.includes("'analyse-multi-video': 'inference:write'"), true, 'main.cjs must scope analyse-multi-video');
 assert.equal(mainContent.includes("/api/analyse-multi-video"), true, 'main.cjs must handle /api/analyse-multi-video route');
 console.log('✔ Multi-video action scoping and route verified');
+
+// Test 18: Centralized URL utils and trusted external domains module exists
+const urlUtilsPath = path.join(FRONTEND_DIR, 'electron', 'url-utils.cjs');
+assert.equal(fs.existsSync(urlUtilsPath), true, 'url-utils.cjs must exist');
+const urlUtils = await import(pathToFileURL(urlUtilsPath).href);
+assert.equal(Array.isArray(urlUtils.TRUSTED_EXTERNAL_DOMAINS), true, 'TRUSTED_EXTERNAL_DOMAINS must be an array');
+assert.equal(urlUtils.TRUSTED_EXTERNAL_DOMAINS.includes('github.com'), true, 'github.com must be in trusted allowlist');
+assert.equal(urlUtils.TRUSTED_EXTERNAL_DOMAINS.includes('ultralytics.com'), true, 'ultralytics.com must be in trusted allowlist');
+assert.equal(urlUtils.TRUSTED_EXTERNAL_DOMAINS.includes('opencv.org'), true, 'opencv.org must be in trusted allowlist');
+console.log('✔ Centralized URL utils & trusted domain allowlist verified');
+
+// Test 19: Centralized external URL validation logic
+const { validateExternalUrl, isMatchingDomain } = urlUtils;
+assert.equal(validateExternalUrl('https://github.com/harsh-aggarwal').isTrusted, true, 'github.com must be trusted');
+assert.equal(validateExternalUrl('https://docs.ultralytics.com/').isTrusted, true, 'docs.ultralytics.com must be trusted');
+assert.equal(validateExternalUrl('https://untrusted-site.org/').isTrusted, false, 'untrusted site must NOT be trusted');
+assert.equal(validateExternalUrl('https://untrusted-site.org/').valid, true, 'untrusted http/https must be valid');
+assert.equal(validateExternalUrl('javascript:alert(1)').valid, false, 'javascript protocol must be rejected');
+assert.equal(validateExternalUrl('file:///etc/passwd').valid, false, 'file protocol must be rejected');
+assert.equal(validateExternalUrl('data:text/html,test').valid, false, 'data protocol must be rejected');
+assert.equal(validateExternalUrl('https://github.com.untrusted.example/').isTrusted, false, 'subdomain spoofing must NOT be trusted');
+assert.equal(validateExternalUrl('https://admin:pass@github.com/').valid, false, 'credentials in URL must be rejected');
+assert.equal(validateExternalUrl('https://github.com:8443/').valid, false, 'unexpected port must be rejected');
+console.log('✔ Centralized external URL validation logic verified');
+
+// Test 20: main.cjs wires setWindowOpenHandler and will-navigate securely
+assert.equal(mainContent.includes("openExternalUrl"), true, 'main.cjs must import and invoke openExternalUrl');
+assert.equal(mainContent.includes("setWindowOpenHandler"), true, 'main.cjs must register setWindowOpenHandler');
+assert.equal(mainContent.includes("action: 'deny'"), true, 'main.cjs must always return action: deny in setWindowOpenHandler');
+console.log('✔ Window open and navigation containment handlers in main.cjs verified');
 
 console.log('--- ALL ELECTRON SECURITY TESTS PASSED ---');

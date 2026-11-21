@@ -1,3 +1,12 @@
+/*
+ * Urban Flow - Adaptive Traffic Signal System
+ * Copyright (c) 2026 Harsh Aggarwal <aggarwalharsh663@gmail.com>. All rights reserved.
+ *
+ * Original Author & Sole Intellectual Property Owner: Harsh Aggarwal
+ * Any additions, modifications, or contributed files to this project automatically
+ * and irrevocably vest all copyright and intellectual property rights solely in Harsh Aggarwal.
+ */
+
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { parseErrorMessage } from "../../lib/error-parser";
 import {
@@ -33,7 +42,8 @@ async function request(url, options = {}) {
   if (token && !headers.has("X-API-Token")) {
     headers.set("X-API-Token", token);
   }
-  const response = await fetch(fullUrl, { ...options, headers });
+  const signal = options.signal || (typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(options.timeout || 30000) : undefined);
+  const response = await fetch(fullUrl, { ...options, headers, signal });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
     const message = parseErrorMessage(body, response.status, "The request could not be completed.");
@@ -72,7 +82,8 @@ function downloadReport(report) {
     "|---|---:|---:|---:|---:|---:|---|",
     ...DIRECTIONS.map((direction) => {
       const g = report.green_times[direction];
-      const r = report.red_times?.[direction] ?? Math.max(0, fullCycle - g - y);
+      const allRed = report.all_red_seconds ?? report.cycle?.all_red_seconds_per_phase ?? 0;
+      const r = report.red_times?.[direction] ?? Math.max(0, fullCycle - g - y - allRed);
       const ry = report.red_yellow_times?.[direction] ?? Math.max(0, fullCycle - g);
       return `| ${direction} | ${report.counts[direction]} | ${g} sec | ${y} sec | ${r} sec | ${ry} sec | ${report.status[direction]} |`;
     }),
@@ -206,8 +217,9 @@ function DirectionCard({ direction, report }) {
   const count = report?.counts?.[direction] ?? 0;
   const green = report?.green_times?.[direction] ?? 30;
   const yellow = report?.yellow_seconds ?? report?.cycle?.yellow_seconds_per_phase ?? 3;
+  const allRed = report?.all_red_seconds ?? report?.cycle?.all_red_seconds_per_phase ?? 0;
   const fullCycle = report?.cycle?.estimated_full_cycle_seconds ?? report?.cycle?.total_green_seconds ?? 120;
-  const red = report?.red_times?.[direction] ?? Math.max(0, fullCycle - green - yellow);
+  const red = report?.red_times?.[direction] ?? Math.max(0, fullCycle - green - yellow - allRed);
   const redYellow = report?.red_yellow_times?.[direction] ?? Math.max(0, fullCycle - green);
   const status = report?.status?.[direction] ?? "Awaiting data";
   return (
@@ -296,10 +308,13 @@ function UploadAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetCha
     if (!selected) return;
     const extension = selected.name.toLowerCase().split(".").pop();
     const isImage = ["jpg", "jpeg", "png"].includes(extension) || ["image/jpeg", "image/png"].includes(selected.type);
-    const isVideo = extension === "mp4" || selected.type === "video/mp4";
-    if (!isImage && !isVideo) { setError("Choose a JPG, JPEG, PNG, or MP4 file."); return; }
+    const isVideo = ["mp4", "avi"].includes(extension) || ["video/mp4", "video/x-msvideo"].includes(selected.type);
+    if (!isImage && !isVideo) { setError("Choose a JPG, JPEG, PNG, MP4, or AVI file."); return; }
     if (selected.size > 100 * 1024 * 1024) { setError("File is larger than the 100 MB limit."); return; }
     setError("");
+    if (preview && preview.startsWith("blob:")) {
+      URL.revokeObjectURL(preview);
+    }
     setFile(selected);
     setPreview(URL.createObjectURL(selected));
   };
@@ -310,21 +325,31 @@ function UploadAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetCha
     form.append("file", file);
     if (junctionName?.trim()) form.append("junction_name", junctionName.trim().slice(0, 100));
     form.append("green_budget", greenBudget);
+    form.append("yellow_seconds", 3);
+    form.append("all_red_seconds", 0);
     form.append("use_cloud_ai", useCloudAi ? "true" : "false");
     try {
-      const endpoint = file.type.startsWith("video/") || file.name.toLowerCase().endsWith(".mp4") ? "/api/analyse-video" : "/api/analyse-image";
+      const endpoint = file.type.startsWith("video/") || file.name.toLowerCase().endsWith(".mp4") || file.name.toLowerCase().endsWith(".avi") ? "/api/analyse-video" : "/api/analyse-image";
       const report = await request(endpoint, { method: "POST", body: form });
       onReport(report);
     } catch (exception) { setError(parseErrorMessage(exception, exception.status, "Traffic analysis failed.")); }
     finally { setBusy(false); }
   };
-  const reset = () => { setFile(null); setPreview(""); setError(""); if (inputRef.current) inputRef.current.value = ""; };
+  const reset = () => {
+    if (preview && preview.startsWith("blob:")) {
+      URL.revokeObjectURL(preview);
+    }
+    setFile(null);
+    setPreview("");
+    setError("");
+    if (inputRef.current) inputRef.current.value = "";
+  };
   return (
     <div className="upload-panel">
       <div className={`dropzone ${preview ? "has-preview" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); acceptFile(event.dataTransfer.files[0]); }}>
-        <input ref={inputRef} type="file" accept=".jpg,.jpeg,.png,.mp4,image/jpeg,image/png,video/mp4" hidden onChange={(event) => acceptFile(event.target.files[0])} />
-        {preview ? <div className="preview-wrap">{file.type.startsWith("video/") || file.name.endsWith(".mp4") ? <video src={preview} controls /> : <img src={preview} alt="Uploaded junction preview" />}<div className="preview-footer"><span>{file.name}</span><button className="icon-button" onClick={reset} aria-label="Remove file"><X size={16} /></button></div></div> :
-          <button className="drop-content" onClick={() => inputRef.current?.click()}><span className="upload-icon"><UploadCloud size={23} /></span><strong>Drop a junction image or video here</strong><span>or <u>browse files</u> from your device</span><small><FileImage size={13} /> JPG, JPEG, PNG <i /> <FileVideo2 size={13} /> MP4 · up to 100 MB</small></button>}
+        <input ref={inputRef} type="file" accept=".jpg,.jpeg,.png,.mp4,.avi,image/jpeg,image/png,video/mp4,video/x-msvideo" hidden onChange={(event) => acceptFile(event.target.files[0])} />
+        {preview ? <div className="preview-wrap">{(file && (file.type?.startsWith("video/") || /\.(mp4|avi)$/i.test(file.name || ""))) ? <video src={preview} controls /> : <img src={preview} alt="Uploaded junction preview" />}<div className="preview-footer"><span>{file?.name}</span><button className="icon-button" onClick={reset} aria-label="Remove file"><X size={16} /></button></div></div> :
+          <button className="drop-content" onClick={() => inputRef.current?.click()}><span className="upload-icon"><UploadCloud size={23} /></span><strong>Drop a junction image or video here</strong><span>or <u>browse files</u> from your device</span><small><FileImage size={13} /> JPG, JPEG, PNG <i /> <FileVideo2 size={13} /> MP4, AVI · up to 100 MB</small></button>}
       </div>
       {error && <div className="inline-error"><AlertTriangle size={15} />{error}</div>}
       
@@ -377,7 +402,7 @@ function Simulation({ onReport, junctionName, greenBudget = 120, onBudgetChange 
   const update = (direction, value) => { setCounts((previous) => ({ ...previous, [direction]: Math.max(0, Math.min(10000, Number(value) || 0)) })); setSelectedPreset(""); };
   const simulate = async () => {
     setBusy(true); setError("");
-    try { const report = await request("/api/simulate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ junction_name: (junctionName || "Demo Junction").slice(0, 100), counts, green_budget: greenBudget }) }); onReport(report); }
+    try { const report = await request("/api/simulate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ junction_name: (junctionName || "Demo Junction").slice(0, 100), counts, green_budget: greenBudget, yellow_seconds: 3, all_red_seconds: 0 }) }); onReport(report); }
     catch (exception) { setError(parseErrorMessage(exception, exception.status, "Simulation failed.")); }
     finally { setBusy(false); }
   };
@@ -522,6 +547,8 @@ function MultiVideoAnalysis({ onReport, junctionName, greenBudget = 120, onBudge
       form.append("junction_name", junctionName.trim().slice(0, 100));
     }
     form.append("green_budget", greenBudget);
+    form.append("yellow_seconds", 3);
+    form.append("all_red_seconds", 0);
     form.append("sample_fps", sampleFps);
 
     try {
@@ -875,12 +902,12 @@ function updateReportBudget(report, budget) {
   const green_times = calculateClientGreenTimes(report.counts, budget);
   const total_green = Object.values(green_times).reduce((a, b) => a + b, 0);
   const yellow = report.yellow_seconds ?? report.cycle?.yellow_seconds_per_phase ?? 3;
-  const allRed = 0;
-  const fullCycle = total_green; // Exact cycle budget (e.g. 120s, NOT 140s)
+  const allRed = report.all_red_seconds ?? report.cycle?.all_red_seconds_per_phase ?? 0;
+  const fullCycle = total_green + (yellow + allRed) * DIRECTIONS.length;
   const red_times = {};
   const red_yellow_times = {};
   for (const d of DIRECTIONS) {
-    red_times[d] = Math.max(0, fullCycle - green_times[d] - yellow);
+    red_times[d] = Math.max(0, fullCycle - green_times[d] - yellow - allRed);
     red_yellow_times[d] = Math.max(0, fullCycle - green_times[d]);
   }
   const busiest = DIRECTIONS.reduce((maxD, d) => (report.counts[d] > (report.counts[maxD] || 0) ? d : maxD), DIRECTIONS[0]);

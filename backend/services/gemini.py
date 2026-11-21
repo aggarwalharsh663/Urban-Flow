@@ -13,13 +13,14 @@ import os
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Callable, Optional
 
 import cv2
 
 try:
-    from security_config import MAX_GEMINI_DETECTIONS
+    from security_config import MAX_GEMINI_DETECTIONS, OperationCancelledError
 except ImportError:
-    from backend.security_config import MAX_GEMINI_DETECTIONS
+    from backend.security_config import MAX_GEMINI_DETECTIONS, OperationCancelledError
 
 from services.detection import DIRECTIONS, _write_annotated_frame, assign_direction
 
@@ -136,7 +137,9 @@ def _parse_detections(response: dict, width: int, height: int) -> list[dict]:
     return detections
 
 
-def _request_gemini(frame) -> list[dict]:
+def _request_gemini(frame, cancellation_check: Optional[Callable[[], bool]] = None) -> list[dict]:
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Gemini analysis cancelled before network request.")
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         raise GeminiAnalysisError("Gemini is not configured.")
@@ -173,6 +176,8 @@ def _request_gemini(frame) -> list[dict]:
         headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
         method="POST",
     )
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Gemini analysis cancelled before dispatching HTTP request.")
     try:
         with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
             result = json.loads(response.read().decode("utf-8"))
@@ -180,39 +185,67 @@ def _request_gemini(frame) -> list[dict]:
         raise GeminiAnalysisError(f"The Gemini API returned HTTP {error.code}.") from error
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
         raise GeminiAnalysisError("The Gemini request failed.") from error
+
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Gemini analysis cancelled after receiving response.")
     return _parse_detections(result, original_width, original_height)
 
 
-def _read_frame(path: Path, video: bool):
+def _read_frame(path: Path, video: bool, cancellation_check: Optional[Callable[[], bool]] = None):
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Frame reading cancelled before start.")
     if not video:
         frame = cv2.imread(str(path))
         if frame is None:
             raise ValueError("OpenCV could not read this image. Try a valid JPG or PNG file.")
+        if cancellation_check and cancellation_check():
+            raise OperationCancelledError("Frame reading cancelled after reading image.")
         return frame
 
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
-        raise ValueError("OpenCV could not open this MP4 video.")
-    frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = capture.get(cv2.CAP_PROP_FPS)
-    if frame_count <= 0 or fps <= 0:
+        ext_label = path.suffix.upper().lstrip(".") or "video"
+        raise ValueError(f"OpenCV could not open this {ext_label} video.")
+    try:
+        if cancellation_check and cancellation_check():
+            raise OperationCancelledError("Video frame reading cancelled during capture open.")
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        if frame_count <= 0 or fps <= 0:
+            raise ValueError("The video does not contain readable frames.")
+        if cancellation_check and cancellation_check():
+            raise OperationCancelledError("Video frame reading cancelled before seek.")
+        capture.set(cv2.CAP_PROP_POS_FRAMES, frame_count // 2)
+        if cancellation_check and cancellation_check():
+            raise OperationCancelledError("Video frame reading cancelled before read.")
+        success, frame = capture.read()
+        if not success or frame is None:
+            raise ValueError("Could not read a representative frame from the video.")
+        return frame
+    finally:
         capture.release()
-        raise ValueError("The video does not contain readable frames.")
-    capture.set(cv2.CAP_PROP_POS_FRAMES, frame_count // 2)
-    success, frame = capture.read()
-    capture.release()
-    if not success:
-        raise ValueError("Could not read a representative frame from the video.")
-    return frame
 
 
-def analyse_with_gemini(path: Path, output_dir: Path, video: bool) -> dict:
-    frame = _read_frame(path, video)
-    detections = _request_gemini(frame)
+def analyse_with_gemini(
+    path: Path,
+    output_dir: Path,
+    video: bool,
+    cancellation_check: Optional[Callable[[], bool]] = None,
+) -> dict:
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Gemini analysis cancelled before starting.")
+    frame = _read_frame(path, video, cancellation_check=cancellation_check)
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Gemini analysis cancelled before requesting Gemini.")
+    detections = _request_gemini(frame, cancellation_check=cancellation_check)
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Gemini analysis cancelled before counting detections.")
     counts = {direction: 0 for direction in DIRECTIONS}
     for detection in detections:
         counts[detection["direction"]] += 1
 
+    if cancellation_check and cancellation_check():
+        raise OperationCancelledError("Gemini analysis cancelled before writing annotated image.")
     annotated_filename = f"{path.stem}-annotated.jpg"
     _write_annotated_frame(frame, detections, output_dir / annotated_filename)
     return {
