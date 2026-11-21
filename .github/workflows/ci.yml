@@ -1,0 +1,90 @@
+# Urban Flow - Adaptive Traffic Signal System
+# Copyright (c) 2026 Harsh Aggarwal <aggarwalharsh663@gmail.com>. All rights reserved.
+#
+# Original Author & Sole Intellectual Property Owner: Harsh Aggarwal
+# Any additions, modifications, or contributed files to this project automatically
+# and irrevocably vest all copyright and intellectual property rights solely in Harsh Aggarwal.
+
+name: Urban Flow CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  backend-tests:
+    name: Backend Pytest Suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install System Dependencies (OpenCV & GL)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgl1 libglib2.0-0 ffmpeg
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Verify Copyright Headers (100% Policy)
+        run: |
+          python -c "
+          import os
+          exts = ('.py', '.ts', '.tsx', '.js', '.jsx', '.cs', '.cjs', '.mjs')
+          missing = []
+          for root, dirs, files in os.walk('.'):
+              if any(x in root for x in ['node_modules', '.git', 'backend/python', 'dist', 'build', '.cache', '.output']):
+                  continue
+              for f in files:
+                  if f.endswith(exts):
+                      p = os.path.join(root, f)
+                      with open(p, 'r', encoding='utf-8', errors='ignore') as fp:
+                          if 'Harsh Aggarwal' not in fp.read(400):
+                              missing.append(p)
+          if missing:
+              print('Files missing copyright header:', missing)
+              exit(1)
+          print('All source files pass copyright verification.')
+          "
+
+      - name: Run Pytest
+        run: |
+          pytest backend/tests -v
+
+  frontend-tests:
+    name: Frontend Vitest & Security Suites
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: "frontend/package-lock.json"
+
+      - name: Install Frontend Dependencies
+        working-directory: frontend
+        run: npm ci || npm install
+
+      - name: Run Frontend Tests (Vitest)
+        working-directory: frontend
+        run: npm run test -- --run
+
+      - name: Run Electron Security Tests
+        working-directory: frontend
+        run: node test/electron_security.test.mjs
