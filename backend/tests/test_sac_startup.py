@@ -35,6 +35,10 @@ def call_runner(action: str, arg1: str = "", arg2: str = "") -> str:
 
 def test_locate_electron_valid_repo():
     """Verify LocateElectron resolves the bundled Electron executable and frontend directory in the Urban Flow repository."""
+    electron_exe = os.path.join(ROOT_DIR, "frontend", "node_modules", "electron", "dist", "electron.exe")
+    if not os.path.isfile(electron_exe):
+        pytest.skip("frontend/node_modules/electron not installed; run npm install in frontend to test live resolution")
+
     out = call_runner("locate", ROOT_DIR)
     parts = out.split("|")
     assert len(parts) == 3
