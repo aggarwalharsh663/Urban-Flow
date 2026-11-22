@@ -42,7 +42,10 @@ async function request(url, options = {}) {
   if (token && !headers.has("X-API-Token")) {
     headers.set("X-API-Token", token);
   }
-  const signal = options.signal || (typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(options.timeout || 30000) : undefined);
+  const isAnalysis = url.includes("/analyse") || (typeof FormData !== "undefined" && options.body instanceof FormData);
+  const defaultTimeout = isAnalysis ? 300000 : 30000;
+  const timeoutMs = options.timeout || defaultTimeout;
+  const signal = options.signal || (typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined);
   const response = await fetch(fullUrl, { ...options, headers, signal });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {

@@ -764,7 +764,11 @@ class BoundedCancellationRegistry:
                 if orphan_key is not None:
                     del self._entries[orphan_key]
                 else:
-                    return False
+                    # All current entries are for active requests.
+                    # Keep active cancellations outside the orphan limit, but reject excess orphans.
+                    if cancel_id not in self._active_requests:
+                        return False
+                    break
 
             self._entries[cancel_id] = now
             return True
@@ -879,11 +883,16 @@ CANCELLED_REQUESTS = BoundedCancellationRegistry()
 _cancel_lock = CANCELLED_REQUESTS._lock
 
 
-def cancel_request(cancel_id: str) -> None:
+def cancel_request(cancel_id: str) -> bool:
     """Register request cancellation in a thread-safe manner."""
     if cancel_id:
-        CANCELLED_REQUESTS.add(cancel_id)
-        LOGGER.info("Registered cancellation for request ID: %s", cancel_id)
+        success = CANCELLED_REQUESTS.add(cancel_id)
+        if success:
+            LOGGER.info("Registered cancellation for request ID: %s", cancel_id)
+        else:
+            LOGGER.warning("Cancellation rejected for request ID (capacity exceeded): %s", cancel_id)
+        return success
+    return False
 
 
 def is_request_cancelled(req_id: Optional[str]) -> bool:
@@ -904,8 +913,11 @@ def handle_directions(data: dict) -> dict:
 def handle_cancel(data: dict) -> dict:
     """Handle task cancellation request from Electron (R6)."""
     cancel_id = str(data.get("cancel_id", "")).strip()
-    if cancel_id:
-        cancel_request(cancel_id)
+    if not cancel_id:
+        return {"cancelled": False, "error": "Missing cancel_id"}
+    success = cancel_request(cancel_id)
+    if not success:
+        return {"cancelled": False, "error": "Cancellation rejected: registry capacity exceeded"}
     return {"cancelled": cancel_id}
 
 
@@ -1124,12 +1136,24 @@ def main():
                                 auth_fail_msg = err_msg or "Unauthorized: invalid IPC token or insufficient scope"
                                 _send_response({"id": req.get("id"), "ok": False, "error": auth_fail_msg, "detail": auth_fail_msg})
                             continue
-                        handle_cancel(req.get("data") or {})
+                        cancel_res = handle_cancel(req.get("data") or {})
                         if req.get("id"):
-                            _send_response({"id": req.get("id"), "ok": True, "result": {"cancelled": True}})
+                            if cancel_res.get("cancelled") is not False:
+                                _send_response({"id": req.get("id"), "ok": True, "result": {"cancelled": True}})
+                            else:
+                                err = cancel_res.get("error", "Cancellation rejected")
+                                _send_response({"id": req.get("id"), "ok": False, "error": err, "detail": err})
                         continue
                     if action in FAST_ACTIONS:
-                        fast_executor.submit(lambda r=req: _send_response(process_ipc_request(r)))
+                        req_id = req.get("id")
+                        if req_id:
+                            CANCELLED_REQUESTS.mark_active(req_id)
+                        try:
+                            fast_executor.submit(lambda r=req: _send_response(process_ipc_request(r)))
+                        except Exception:
+                            if req_id:
+                                CANCELLED_REQUESTS.unmark_active(req_id)
+                            raise
                         continue
                     if req.get("id"):
                         CANCELLED_REQUESTS.mark_active(req["id"])

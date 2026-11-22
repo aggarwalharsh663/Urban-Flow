@@ -777,6 +777,15 @@ async def analyse_multi_video_endpoint(
             detail="At least one directional video must be uploaded.",
         )
 
+    # Validate all video extensions upfront before any quota reservation or cleanup
+    for d, upload_file in provided_files.items():
+        suffix = Path(upload_file.filename or "").suffix.lower()
+        if suffix not in ALLOWED_VIDEO_EXTENSIONS or suffix not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported video type '{suffix}' for {d}. Allowed: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}",
+            )
+
     saved_paths: dict[str, Path] = {}
     temp_files: list[Path] = []
     total_size = 0
@@ -796,12 +805,7 @@ async def analyse_multi_video_endpoint(
 
     try:
         for d, upload_file in provided_files.items():
-            suffix = Path(upload_file.filename).suffix.lower()
-            if suffix not in ALLOWED_VIDEO_EXTENSIONS:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Unsupported video type '{suffix}' for {d}. Allowed: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}",
-                )
+            suffix = Path(upload_file.filename or "").suffix.lower()
 
             dest_filename = f"{uuid.uuid4().hex}{suffix}"
             dest_path = UPLOAD_DIR / dest_filename
@@ -854,15 +858,9 @@ async def analyse_multi_video_endpoint(
             total_size += file_bytes
             saved_paths[d] = dest_path
 
-        # Update quota reservation to exact total size
+        # Release initial reservation; uploaded files are now committed on disk and tracked
         GLOBAL_STORAGE_MANAGER.release(reservation_id)
         reservation_id = None
-        reserved, reservation_id = GLOBAL_STORAGE_MANAGER.reserve(total_size)
-        if not reserved:
-            raise HTTPException(
-                status_code=status.HTTP_507_INSUFFICIENT_STORAGE,
-                detail="Storage quota exceeded (500 MB limit reached).",
-            )
 
         sanitized_name = sanitize_junction_name(junction_name or "Multi-Camera Junction")
         result = analyse_multi_directional_videos(

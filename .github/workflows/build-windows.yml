@@ -54,7 +54,9 @@ jobs:
           }
           Write-Host "Compiling with: $csc"
           & $csc /target:winexe /out:"Urban Flow.exe" launcher.cs
+          if ($LASTEXITCODE -ne 0) { throw "Compilation of launcher.cs failed with exit code $LASTEXITCODE" }
           & $csc /target:winexe /out:"updater.exe" updater.cs
+          if ($LASTEXITCODE -ne 0) { throw "Compilation of updater.cs failed with exit code $LASTEXITCODE" }
 
       - name: Build Setup Installer
         shell: powershell

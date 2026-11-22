@@ -77,15 +77,31 @@ When your local laptop is turned off, local processes and hardware ports cannot 
    ```bash
    ssh ubuntu@<YOUR_SERVER_IP>
    ```
-2. Clone the repository:
+2. Clone the repository and install dependencies:
    ```bash
    git clone https://github.com/aggarwalharsh663/Urban-Flow.git
    cd Urban-Flow
+
+   # Install system packages for OpenCV and video analysis
+   sudo apt-get update && sudo apt-get install -y python3-venv python3-pip libgl1 libglib2.0-0 ffmpeg
+
+   # Set up hermetic virtual environment and install backend requirements
+   python3 -m venv .venv
+   .venv/bin/pip install --upgrade pip
+   .venv/bin/pip install -r backend/requirements.txt
    ```
+
 3. Set up VS Code Remote Tunnel (allows you to code from `vscode.dev`):
    ```bash
-   # Download VS Code CLI
-   curl -Lk 'https://code.visualstudio.com/sha/download?build=stable&os=cli-alpine-x64' --output vscode_cli.tar.gz
+   # Detect architecture (ARM64 for Ampere OCI, x64 for standard VMs) and download official VS Code CLI with SSL verification
+   ARCH=$(uname -m)
+   if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
+       CLI_ARCH="cli-alpine-arm64"
+   else
+       CLI_ARCH="cli-alpine-x64"
+   fi
+
+   curl -sSL "https://code.visualstudio.com/sha/download?build=stable&os=${CLI_ARCH}" --output vscode_cli.tar.gz
    tar -xf vscode_cli.tar.gz
    ./code tunnel --name urbanflow-cloud
    ```
@@ -102,7 +118,7 @@ When your local laptop is turned off, local processes and hardware ports cannot 
    [Service]
    User=ubuntu
    WorkingDirectory=/home/ubuntu/Urban-Flow
-   ExecStart=/usr/bin/python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+   ExecStart=/home/ubuntu/Urban-Flow/.venv/bin/python3 -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
    Restart=always
    RestartSec=5
 
