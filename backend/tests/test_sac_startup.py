@@ -8,7 +8,12 @@
 import os
 import subprocess
 import tempfile
+import sys
+import shutil
 import pytest
+
+if sys.platform != "win32" or not (shutil.which("powershell.exe") or shutil.which("powershell")):
+    pytest.skip("Windows Smart App Control tests require Windows and PowerShell", allow_module_level=True)
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 RUNNER_PS1 = os.path.join(ROOT_DIR, "backend", "tests", "updater_test_runner.ps1")

@@ -21,6 +21,9 @@ import zipfile
 from pathlib import Path
 import pytest
 
+if sys.platform != "win32" or not (shutil.which("powershell") or shutil.which("powershell.exe")):
+    pytest.skip("updater.cs Zip-Slip tests require Windows and PowerShell", allow_module_level=True)
+
 ROOT_DIR = Path(__file__).resolve().parents[2]
 RUNNER_PS1 = Path(__file__).resolve().parent / "updater_test_runner.ps1"
 UPDATER_CS = ROOT_DIR / "updater.cs"
