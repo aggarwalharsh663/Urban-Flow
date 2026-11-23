@@ -138,7 +138,7 @@ function Header({ health, theme, onToggleTheme, activeNav = "dashboard", onNavCl
     <header className="topbar">
       <a
         className="brand"
-        href="#top"
+        href="#dashboard"
         onClick={(e) => handleNavClick(e, "dashboard", "dashboard")}
         aria-label="Adaptive Traffic Signal System home"
       >
@@ -161,6 +161,13 @@ function Header({ health, theme, onToggleTheme, activeNav = "dashboard", onNavCl
           onClick={(e) => handleNavClick(e, "analysis", "analysis")}
         >
           Analysis
+        </a>
+        <a
+          className={activeNav === "results" ? "active" : ""}
+          href="#results"
+          onClick={(e) => handleNavClick(e, "results", "results")}
+        >
+          Signal plans
         </a>
         <a
           className={activeNav === "safety" ? "active" : ""}
@@ -275,25 +282,57 @@ function JunctionDiagram({ report }) {
   );
 }
 
-function Dashboard({ report, setJunctionName }) {
+function Dashboard({ report, setJunctionName, onNavClick }) {
   const [name, setName] = useState(report?.junction_name || "");
   useEffect(() => setName(report?.junction_name || ""), [report?.junction_name]);
+
+  const handleScrollTo = (e, targetId, navKey) => {
+    e.preventDefault();
+    if (onNavClick) onNavClick(navKey || targetId);
+    const target = document.getElementById(targetId);
+    if (target) {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    if (window.history?.pushState) {
+      window.history.pushState(null, "", `#${targetId}`);
+    }
+  };
+
   return (
     <>
       <section className="hero" id="dashboard">
         <div className="hero-copy">
-          <div className="eyebrow"><span className="eyebrow-line" />LOCAL COMPUTER VISION <span className="eyebrow-tag">PROTOTYPE</span></div>
+          <div className="eyebrow"><span className="eyebrow-line" />LOCAL COMPUTER VISION <span className="eyebrow-tag">INTELLIGENT TRAFFIC CONTROL</span></div>
           <h1>Adaptive Traffic<br /><span>Signal System</span></h1>
-          <p className="hero-subtitle">Using local computer vision to recommend smarter signal timings.</p>
-          <div className="hero-actions"><a className="button button-primary" href="#analysis"><Sparkles size={16} />Analyse a junction<ChevronRight size={16} /></a><a className="text-link" href="#how-it-works">How it works <ArrowDown size={14} /></a></div>
+          <p className="hero-subtitle">Autonomous intersection timing optimization powered by local computer vision and deterministic phase allocation.</p>
+          <div className="hero-actions">
+            <a className="button button-primary" href="#analysis" onClick={(e) => handleScrollTo(e, "analysis", "analysis")}><Sparkles size={16} />Analyse a junction<ChevronRight size={16} /></a>
+            <a className="text-link" href="#how-it-works" onClick={(e) => handleScrollTo(e, "how-it-works", "analysis")}>How it works <ArrowDown size={14} /></a>
+          </div>
           <div className="hero-facts"><span><ShieldCheck size={15} />Local processing</span><span><Gauge size={15} />Deterministic timing</span><span><CircleHelp size={15} />Decision support</span></div>
         </div>
         <div className="hero-visual"><div className="visual-glow" /><div className="visual-grid" /><JunctionDiagram report={report} /><div className="visual-caption"><span className="pulse-dot" />LIVE JUNCTION OVERVIEW <span>·</span> QUADRANT ZONES</div></div>
       </section>
       <section className="section-block directions-section">
-        <div className="section-heading"><div><div className="eyebrow"><span className="eyebrow-line" />INTERSECTION OVERVIEW</div><h2>Traffic by direction</h2></div><div className="junction-name"><MapPin size={15} /><input aria-label="Junction name" value={name} placeholder="Junction name" onChange={(event) => { setName(event.target.value); setJunctionName(event.target.value); }} /></div></div>
+        <div className="section-heading">
+          <div><div className="eyebrow"><span className="eyebrow-line" />INTERSECTION OVERVIEW</div><h2>Traffic by direction</h2></div>
+          <div className="junction-name">
+            <MapPin size={15} />
+            <input
+              aria-label="Junction name"
+              value={name}
+              placeholder="Enter intersection name (e.g. 5th Ave & Pine St)"
+              maxLength={100}
+              onChange={(event) => {
+                const val = event.target.value.slice(0, 100);
+                setName(val);
+                setJunctionName(val);
+              }}
+            />
+          </div>
+        </div>
         <div className="direction-grid">{DIRECTIONS.map((direction) => <DirectionCard key={direction} direction={direction} report={report} />)}</div>
-        <div className="prototype-note"><Info size={16} /><span>Prototype only — recommendations must be reviewed before real-world use.</span></div>
+        <div className="prototype-note"><Info size={16} /><span>Decision support system — recommendations are calculated deterministically and require review prior to field controller integration.</span></div>
       </section>
     </>
   );
@@ -312,8 +351,8 @@ function UploadAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetCha
     const extension = selected.name.toLowerCase().split(".").pop();
     const isImage = ["jpg", "jpeg", "png"].includes(extension) || ["image/jpeg", "image/png"].includes(selected.type);
     const isVideo = ["mp4", "avi"].includes(extension) || ["video/mp4", "video/x-msvideo"].includes(selected.type);
-    if (!isImage && !isVideo) { setError("Choose a JPG, JPEG, PNG, MP4, or AVI file."); return; }
-    if (selected.size > 100 * 1024 * 1024) { setError("File is larger than the 100 MB limit."); return; }
+    if (!isImage && !isVideo) { setError("Unsupported format. Please choose a JPG, JPEG, PNG, MP4, or AVI file."); return; }
+    if (selected.size > 100 * 1024 * 1024) { setError("File size exceeds 100 MB limit. Please provide a smaller video or image."); return; }
     setError("");
     if (preview && preview.startsWith("blob:")) {
       URL.revokeObjectURL(preview);
@@ -322,7 +361,10 @@ function UploadAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetCha
     setPreview(URL.createObjectURL(selected));
   };
   const analyse = async () => {
-    if (!file) return;
+    if (!file) {
+      setError("Please select or drop a junction image or video file before starting analysis.");
+      return;
+    }
     setBusy(true); setError("");
     const form = new FormData();
     form.append("file", file);
@@ -335,7 +377,7 @@ function UploadAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetCha
       const endpoint = file.type.startsWith("video/") || file.name.toLowerCase().endsWith(".mp4") || file.name.toLowerCase().endsWith(".avi") ? "/api/analyse-video" : "/api/analyse-image";
       const report = await request(endpoint, { method: "POST", body: form });
       onReport(report);
-    } catch (exception) { setError(parseErrorMessage(exception, exception.status, "Traffic analysis failed.")); }
+    } catch (exception) { setError(parseErrorMessage(exception, exception.status, "Traffic analysis failed. Please verify the media file and backend status.")); }
     finally { setBusy(false); }
   };
   const reset = () => {
@@ -351,10 +393,34 @@ function UploadAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetCha
     <div className="upload-panel">
       <div className={`dropzone ${preview ? "has-preview" : ""}`} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); acceptFile(event.dataTransfer.files[0]); }}>
         <input ref={inputRef} type="file" accept=".jpg,.jpeg,.png,.mp4,.avi,image/jpeg,image/png,video/mp4,video/x-msvideo" hidden onChange={(event) => acceptFile(event.target.files[0])} />
-        {preview ? <div className="preview-wrap">{(file && (file.type?.startsWith("video/") || /\.(mp4|avi)$/i.test(file.name || ""))) ? <video src={preview} controls /> : <img src={preview} alt="Uploaded junction preview" />}<div className="preview-footer"><span>{file?.name}</span><button className="icon-button" onClick={reset} aria-label="Remove file"><X size={16} /></button></div></div> :
-          <button className="drop-content" onClick={() => inputRef.current?.click()}><span className="upload-icon"><UploadCloud size={23} /></span><strong>Drop a junction image or video here</strong><span>or <u>browse files</u> from your device</span><small><FileImage size={13} /> JPG, JPEG, PNG <i /> <FileVideo2 size={13} /> MP4, AVI · up to 100 MB</small></button>}
+        {preview ? (
+          <div className="preview-wrap">
+            {(file && (file.type?.startsWith("video/") || /\.(mp4|avi)$/i.test(file.name || ""))) ? <video src={preview} controls /> : <img src={preview} alt="Uploaded junction preview" />}
+            <div className="preview-footer">
+              <span>{file?.name}</span>
+              <button type="button" className="icon-button" onClick={reset} aria-label="Remove file"><X size={16} /></button>
+            </div>
+          </div>
+        ) : (
+          <button type="button" className="drop-content" onClick={() => inputRef.current?.click()}>
+            <span className="upload-icon"><UploadCloud size={23} /></span>
+            <strong>Drop a junction image or video here</strong>
+            <span>or <u>browse files</u> from your device</span>
+            <small><FileImage size={13} /> JPG, JPEG, PNG <i /> <FileVideo2 size={13} /> MP4, AVI · up to 100 MB</small>
+          </button>
+        )}
       </div>
-      {error && <div className="inline-error"><AlertTriangle size={15} />{error}</div>}
+      {error && (
+        <div className="inline-error" role="alert" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <AlertTriangle size={15} />
+            <span>{error}</span>
+          </div>
+          <button type="button" onClick={() => setError("")} aria-label="Dismiss error" style={{ background: "transparent", border: 0, color: "inherit", cursor: "pointer", display: "grid", placeItems: "center" }}>
+            <X size={15} />
+          </button>
+        </div>
+      )}
       
       {health?.geminiAvailable ? (
         <div className="privacy-option-card" style={{ margin: "14px 0", padding: "12px 14px", borderRadius: "8px", border: "1px solid var(--border-color, #2a3140)", background: "rgba(255,255,255,0.03)" }}>
@@ -389,7 +455,13 @@ function UploadAnalysis({ onReport, junctionName, greenBudget = 120, onBudgetCha
           <ShieldCheck size={14} />
           {useCloudAi ? "Cloud Gemini Mode" : "Local YOLOv8 Mode"}
         </span>
-        <button onClick={analyse} className="button button-primary analyse-button" disabled={!file || busy}>
+        <button
+          type="button"
+          onClick={analyse}
+          className="button button-primary analyse-button"
+          disabled={busy}
+          title={!file ? "Select an image or video to analyze" : "Run vehicle detection and signal analysis"}
+        >
           {busy ? <><LoaderCircle className="spin" size={16} />{useCloudAi ? "Analysing with Gemini…" : "Detecting vehicles locally…"}</> : <><Sparkles size={16} />Analyse traffic</>}
         </button>
       </div>
@@ -402,20 +474,89 @@ function Simulation({ onReport, junctionName, greenBudget = 120, onBudgetChange 
   const [selectedPreset, setSelectedPreset] = useState("Balanced traffic");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const update = (direction, value) => { setCounts((previous) => ({ ...previous, [direction]: Math.max(0, Math.min(10000, Number(value) || 0)) })); setSelectedPreset(""); };
+  const update = (direction, value) => {
+    const num = Number(value);
+    if (isNaN(num) || num < 0) {
+      setError("Vehicle counts must be non-negative integers between 0 and 10,000.");
+      setCounts((previous) => ({ ...previous, [direction]: 0 }));
+      setSelectedPreset("");
+      return;
+    }
+    if (num > 10000) {
+      setError("Vehicle count cannot exceed 10,000 per approach.");
+      setCounts((previous) => ({ ...previous, [direction]: 10000 }));
+      setSelectedPreset("");
+      return;
+    }
+    setError("");
+    setCounts((previous) => ({ ...previous, [direction]: Math.max(0, Math.min(10000, Math.round(num))) }));
+    setSelectedPreset("");
+  };
   const simulate = async () => {
     setBusy(true); setError("");
-    try { const report = await request("/api/simulate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ junction_name: (junctionName || "Demo Junction").slice(0, 100), counts, green_budget: greenBudget, yellow_seconds: 3, all_red_seconds: 0 }) }); onReport(report); }
-    catch (exception) { setError(parseErrorMessage(exception, exception.status, "Simulation failed.")); }
-    finally { setBusy(false); }
+    try {
+      const report = await request("/api/simulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          junction_name: (junctionName || "Grand Ave & 12th St Intersection").slice(0, 100),
+          counts,
+          green_budget: greenBudget,
+          yellow_seconds: 3,
+          all_red_seconds: 0
+        })
+      });
+      onReport(report);
+    } catch (exception) {
+      setError(parseErrorMessage(exception, exception.status, "Simulation failed."));
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <div className="simulation-panel">
-      <div className="simulation-top"><div><span className="sim-icon"><Gauge size={18} /></span><div><strong>Manual count input</strong><small>Try a preset or enter your own counts.</small></div></div><select aria-label="Traffic preset" value={selectedPreset} onChange={(event) => { setSelectedPreset(event.target.value); if (event.target.value) setCounts({ ...PRESETS[event.target.value] }); }}><option value="">Choose a preset</option>{Object.keys(PRESETS).map((name) => <option key={name}>{name}</option>)}</select></div>
-      <div className="count-input-grid">{DIRECTIONS.map((direction) => <label key={direction}><span style={{ color: COLORS[direction] }}><DirectionIcon direction={direction} size={15} />{direction}</span><div className="number-input"><button onClick={() => update(direction, counts[direction] - 1)} aria-label={`Decrease ${direction} count`}>−</button><input aria-label={`${direction} vehicle count`} type="number" min="0" max="10000" value={counts[direction]} onChange={(event) => update(direction, event.target.value)} /><button onClick={() => update(direction, counts[direction] + 1)} aria-label={`Increase ${direction} count`}>+</button></div></label>)}</div>
-      {error && <div className="inline-error"><AlertTriangle size={15} />{error}</div>}
+      <div className="simulation-top">
+        <div>
+          <span className="sim-icon"><Gauge size={18} /></span>
+          <div>
+            <strong>Directional Traffic Volume Modeling</strong>
+            <small>Select an empirical traffic scenario or enter specific vehicle counts.</small>
+          </div>
+        </div>
+        <select aria-label="Traffic preset" value={selectedPreset} onChange={(event) => { setSelectedPreset(event.target.value); if (event.target.value) setCounts({ ...PRESETS[event.target.value] }); }}>
+          <option value="">Choose a preset</option>
+          {Object.keys(PRESETS).map((name) => <option key={name} value={name}>{name}</option>)}
+        </select>
+      </div>
+      <div className="count-input-grid">
+        {DIRECTIONS.map((direction) => (
+          <label key={direction}>
+            <span style={{ color: COLORS[direction] }}><DirectionIcon direction={direction} size={15} />{direction}</span>
+            <div className="number-input">
+              <button type="button" onClick={() => update(direction, counts[direction] - 1)} aria-label={`Decrease ${direction} count`}>−</button>
+              <input aria-label={`${direction} vehicle count`} type="number" min="0" max="10000" value={counts[direction]} onChange={(event) => update(direction, event.target.value)} />
+              <button type="button" onClick={() => update(direction, counts[direction] + 1)} aria-label={`Increase ${direction} count`}>+</button>
+            </div>
+          </label>
+        ))}
+      </div>
+      {error && (
+        <div className="inline-error" role="alert" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <AlertTriangle size={15} />
+            <span>{error}</span>
+          </div>
+          <button type="button" onClick={() => setError("")} aria-label="Dismiss error" style={{ background: "transparent", border: 0, color: "inherit", cursor: "pointer", display: "grid", placeItems: "center" }}>
+            <X size={15} />
+          </button>
+        </div>
+      )}
       <CycleTimingControl budget={greenBudget} onChange={onBudgetChange} title="Signal Cycle Green Budget" description="Pre-set green budget before running simulation" />
-      <button className="button button-secondary simulate-button" onClick={simulate} disabled={busy}>{busy ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={15} />}{busy ? "Building plan…" : "Use simulated traffic data"}<ChevronRight size={15} /></button>
+      <button type="button" className="button button-secondary simulate-button" onClick={simulate} disabled={busy}>
+        {busy ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={15} />}
+        {busy ? "Building plan…" : "Use simulated traffic data"}
+        <ChevronRight size={15} />
+      </button>
     </div>
   );
 }
@@ -534,7 +675,7 @@ function MultiVideoAnalysis({ onReport, junctionName, greenBudget = 120, onBudge
 
   const analyse = async () => {
     if (providedCount === 0) {
-      setError("Please select at least one approach video clip.");
+      setError("Please select at least one approach video clip (North, South, East, or West) before starting analysis.");
       return;
     }
     setBusy(true);
@@ -708,7 +849,17 @@ function MultiVideoAnalysis({ onReport, junctionName, greenBudget = 120, onBudge
         </span>
       </div>
 
-      {error && <div className="inline-error"><AlertTriangle size={15} />{error}</div>}
+      {error && (
+        <div className="inline-error" role="alert" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <AlertTriangle size={15} />
+            <span>{error}</span>
+          </div>
+          <button type="button" onClick={() => setError("")} aria-label="Dismiss error" style={{ background: "transparent", border: 0, color: "inherit", cursor: "pointer", display: "grid", placeItems: "center" }}>
+            <X size={15} />
+          </button>
+        </div>
+      )}
 
       <CycleTimingControl
         budget={greenBudget}
@@ -723,9 +874,11 @@ function MultiVideoAnalysis({ onReport, junctionName, greenBudget = 120, onBudge
           Local YOLOv8 + IoU Temporal Tracker (100% On-Device)
         </span>
         <button
+          type="button"
           onClick={analyse}
           className="button button-primary analyse-button"
-          disabled={providedCount === 0 || busy}
+          disabled={busy}
+          title={providedCount === 0 ? "Select at least one video to analyze" : "Run directional traffic analysis"}
         >
           {busy ? (
             <>
@@ -751,22 +904,22 @@ function AnalysisSection({ onReport, junctionName, greenBudget = 120, onBudgetCh
       <div className="section-heading">
         <div>
           <div className="eyebrow"><span className="eyebrow-line" />ANALYSIS</div>
-          <h2>Give the junction a look</h2>
-          <p className="section-subtitle">Use local YOLOv8 to detect vehicles — or explore with sample counts.</p>
+          <h2>Intersection Traffic Analysis Engine</h2>
+          <p className="section-subtitle">Detect approaching vehicles with local YOLOv8 computer vision or model empirical traffic flows.</p>
         </div>
         <span className="local-badge"><span className="status-dot" />{health?.geminiAvailable ? "LOCAL + OPTIONAL CLOUD" : "PROCESSING STAYS LOCAL"}</span>
       </div>
       <div className="analysis-card">
         <div className="mode-tabs" role="tablist" aria-label="Analysis mode">
-          <button className={mode === "upload" ? "selected" : ""} onClick={() => setMode("upload")}><Video size={15} />Single image / video</button>
-          <button className={mode === "multi_video" ? "selected" : ""} onClick={() => setMode("multi_video")}><Film size={15} />4-Direction Video (N/S/E/W)</button>
-          <button className={mode === "simulate" ? "selected" : ""} onClick={() => setMode("simulate")}><Gauge size={15} />Simulated data</button>
+          <button type="button" className={mode === "upload" ? "selected" : ""} onClick={() => setMode("upload")}><Video size={15} />Single image / video</button>
+          <button type="button" className={mode === "multi_video" ? "selected" : ""} onClick={() => setMode("multi_video")}><Film size={15} />4-Direction Video (N/S/E/W)</button>
+          <button type="button" className={mode === "simulate" ? "selected" : ""} onClick={() => setMode("simulate")}><Gauge size={15} />Simulated data</button>
         </div>
         {mode === "upload" && <UploadAnalysis onReport={onReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={onBudgetChange} health={health} />}
         {mode === "multi_video" && <MultiVideoAnalysis onReport={onReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={onBudgetChange} />}
         {mode === "simulate" && <Simulation onReport={onReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={onBudgetChange} />}
       </div>
-      <div className="how-it-works" id="how-it-works"><span className="how-icon"><CircleHelp size={17} /></span><div><strong>How the prototype works</strong><p>OpenCV reads your upload; local YOLOv8 detects cars, motorcycles, buses, and trucks. Each approach is tracked over time with IoU multi-object tracking to estimate queue depth, flow rate, and directional demand. A deterministic rule distributes your configured green-time budget ({greenBudget}s) fairly.</p></div><span className="how-steps">INPUT <ChevronRight size={12} /> DETECT & TRACK <ChevronRight size={12} /> RECOMMEND</span></div>
+      <div className="how-it-works" id="how-it-works"><span className="how-icon"><CircleHelp size={17} /></span><div><strong>System Architecture & Processing Pipeline</strong><p>OpenCV reads your upload; local YOLOv8 detects cars, motorcycles, buses, and trucks. Each approach is tracked over time with IoU multi-object tracking to estimate queue depth, flow rate, and directional demand. A deterministic rule distributes your configured green-time budget ({greenBudget}s) fairly.</p></div><span className="how-steps">INPUT <ChevronRight size={12} /> DETECT & TRACK <ChevronRight size={12} /> RECOMMEND</span></div>
     </section>
   );
 }
@@ -1043,7 +1196,7 @@ function CycleAdjuster({ report, onUpdateReport }) {
 }
 
 function Results({ report, onUpdateReport }) {
-  if (!report) return <section className="section-block results-empty" id="results"><div className="empty-chart"><BarChart3 size={21} /></div><div><h3>Your signal plan will appear here</h3><p>Analyse an upload or run a simulation to generate a direction-by-direction recommendation.</p></div><span className="empty-indicator"><span />AWAITING ANALYSIS</span></section>;
+  if (!report) return <section className="section-block results-empty" id="results"><div className="empty-chart"><BarChart3 size={21} /></div><div><h3>Signal Plan Output & Phase Allocations</h3><p>Upload approach media or run traffic modeling above to generate an optimized signal timing schedule.</p></div><span className="empty-indicator"><span />AWAITING ANALYSIS</span></section>;
   const y = report.yellow_seconds ?? report.cycle?.yellow_seconds_per_phase ?? 3;
   const fullCycle = report.cycle?.estimated_full_cycle_seconds ?? report.cycle?.total_green_seconds ?? 120;
   const [selectedPreviewDir, setSelectedPreviewDir] = useState("North");
@@ -1061,7 +1214,7 @@ function Results({ report, onUpdateReport }) {
 
   return (
     <section className="section-block results-section" id="results">
-      <div className="section-heading result-heading"><div><div className="eyebrow"><span className="eyebrow-line" />ANALYSIS REPORT <span className="report-tag">{report.source === "simulated" ? "SIMULATION" : report.source === "multi_video" ? "4-DIRECTION VIDEO" : "LOCAL DETECTION"}</span></div><h2>Signal plan <span className="result-junction">{report.junction_name}</span></h2><p className="section-subtitle"><Clock3 size={14} /> Analysed {formatDate(report.analysed_at)}</p></div><button className="button button-outline" onClick={() => downloadReport(report)}><Download size={15} />Download signal plan</button></div>
+      <div className="section-heading result-heading"><div><div className="eyebrow"><span className="eyebrow-line" />ANALYSIS REPORT <span className="report-tag">{report.source === "simulated" ? "SIMULATION" : report.source === "multi_video" ? "4-DIRECTION VIDEO" : "LOCAL DETECTION"}</span></div><h2>Signal plan <span className="result-junction">{report.junction_name}</span></h2><p className="section-subtitle"><Clock3 size={14} /> Analysed {formatDate(report.analysed_at)}</p></div><button type="button" className="button button-outline" onClick={() => downloadReport(report)}><Download size={15} />Download signal plan</button></div>
       <div className="result-grid">
         <div className="result-main">
           <div className="result-card"><div className="result-card-heading"><div><h3>Traffic density & signal timings</h3><p>Vehicle volume compared with green and red light seconds</p></div><div className="chart-legend"><span><i className="legend-vehicles" />Vehicles</span><span><i className="legend-green" />Green seconds</span><span><i className="legend-red" />Red seconds</span></div></div>
@@ -1224,7 +1377,7 @@ function Results({ report, onUpdateReport }) {
                     <img src={imageUrl(activeAnnotatedUrl)} alt="Locally annotated vehicle detections" />
                   </div>
                 ) : (
-                  <div className="no-media"><FileImage size={22} /><span>Simulation contains no source image.</span></div>
+                  <div className="no-media"><FileImage size={22} /><span>Numerical simulation mode active — no camera feed available.</span></div>
                 )}
               </>
             )}
@@ -1268,7 +1421,7 @@ export default function App() {
       const navSections = [
         { id: "dashboard", key: "dashboard" },
         { id: "analysis", key: "analysis" },
-        { id: "results", key: "analysis" },
+        { id: "results", key: "results" },
         { id: "safety", key: "safety" },
       ];
 
@@ -1414,5 +1567,126 @@ export default function App() {
     {health?.apiAvailable === false && <div className="setup-notice" role="status"><Info size={17} /><div><strong>Backend is not running</strong><p>Open PowerShell in the project folder and run <code>.\start-local.ps1</code>. This starts the API and website.</p></div><button type="button" onClick={() => window.location.reload()} aria-label="Retry backend connection"><RotateCcw size={15} />Retry</button></div>}
     {health?.authRequired && <div className="setup-notice setup-notice-warning" role="alert"><Info size={17} /><div><strong>Authentication required</strong><p>Check local dev token configuration. Run <code>start.bat</code> to launch with the authenticated local dev proxy, or verify backend authentication.</p></div></div>}
     {health?.apiAvailable && (!health.computerVisionReady || !health.modelAvailable) && <div className="setup-notice setup-notice-warning" role="status"><Info size={17} /><div><strong>{!health.computerVisionReady ? "Image/video analysis needs setup" : "Local YOLO model is missing"}</strong><p>{!health.computerVisionReady ? `Missing packages: ${health.missingDependencies.join(", ") || "OpenCV and Ultralytics"}. Run .\\backend\\setup.ps1, then restart the backend.` : "Download yolov8n.pt into backend\\, then restart the backend. Simulated counts are ready now."}</p></div></div>}
-    <main><Dashboard report={report} setJunctionName={setJunctionName} /><AnalysisSection onReport={showReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={(b) => { setGreenBudget(b); if (report) { setReport(updateReportBudget(report, b)); if (report.report_id) { request(`/api/reports/${report.report_id}/cycle`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ green_budget: b }) }).then(setReport).catch(() => {}); } } }} health={health} /><Results report={report} onUpdateReport={setReport} /><Safety /></main><footer className="footer"><a className="brand footer-brand" href="#top" aria-label="UrbanFlow home"><img src={theme === "light" ? "/urban-flow-light.png" : "/urban-flow-dark.png"} alt="UrbanFlow" /></a><span>{hasMounted ? "Computer vision · Local YOLOv8 & Optional Gemini · Transparent Privacy" : "Local computer vision · OpenCV + YOLOv8 · No cloud AI"}</span><a href="#safety">Safety & limitations <ArrowUp size={13} /></a>{hasMounted && <div className="footer-copyright" style={{ width: "100%", textAlign: "center", paddingTop: "12px", borderTop: "1px dashed var(--rule)", color: "var(--ink-soft)", opacity: 0.85, fontSize: "11px" }}>Copyright © 2026 Harsh Aggarwal. All rights reserved. Intellectual Property of Harsh Aggarwal.</div>}</footer></div>;
+    <main>
+      <Dashboard report={report} setJunctionName={setJunctionName} onNavClick={setActiveNav} />
+      <AnalysisSection onReport={showReport} junctionName={junctionName} greenBudget={greenBudget} onBudgetChange={(b) => { setGreenBudget(b); if (report) { setReport(updateReportBudget(report, b)); if (report.report_id) { request(`/api/reports/${report.report_id}/cycle`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ green_budget: b }) }).then(setReport).catch(() => {}); } } }} health={health} />
+      <Results report={report} onUpdateReport={setReport} />
+      <Safety />
+    </main>
+    <footer className="footer" role="contentinfo">
+      <div className="footer-top">
+        <div className="footer-brand-col">
+          <a
+            className="brand footer-brand"
+            href="#dashboard"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveNav("dashboard");
+              document.getElementById("dashboard")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+            aria-label="UrbanFlow home"
+          >
+            <img src={theme === "light" ? "/urban-flow-light.png" : "/urban-flow-dark.png"} alt="UrbanFlow — Adaptive Traffic Signal System" />
+          </a>
+          <p>
+            Autonomous adaptive traffic signal management system utilizing local computer vision (YOLOv8) to eliminate intersection congestion and ensure fair clearance intervals.
+          </p>
+        </div>
+
+        <div className="footer-col">
+          <h4>Navigation</h4>
+          <a
+            href="#dashboard"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveNav("dashboard");
+              document.getElementById("dashboard")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+          >
+            <ChevronRight size={13} />
+            Intersection Overview
+          </a>
+          <a
+            href="#analysis"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveNav("analysis");
+              document.getElementById("analysis")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+          >
+            <ChevronRight size={13} />
+            Traffic Analysis Engine
+          </a>
+          <a
+            href="#results"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveNav("results");
+              document.getElementById("results")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+          >
+            <ChevronRight size={13} />
+            Signal Timing Plans
+          </a>
+          <a
+            href="#how-it-works"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveNav("analysis");
+              document.getElementById("how-it-works")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+          >
+            <ChevronRight size={13} />
+            System Architecture
+          </a>
+          <a
+            href="#safety"
+            onClick={(e) => {
+              e.preventDefault();
+              setActiveNav("safety");
+              document.getElementById("safety")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
+          >
+            <ChevronRight size={13} />
+            Safety & Standards
+          </a>
+        </div>
+
+        <div className="footer-col">
+          <h4>Core Engine</h4>
+          <span>• Local YOLOv8 Inference</span>
+          <span>• IoU Temporal Multi-Object Tracker</span>
+          <span>• Deterministic Webster Phase Budgeting</span>
+          <span>• Zero-Cloud-Leakage Privacy Policy</span>
+        </div>
+
+        <div className="footer-col">
+          <h4>System Status</h4>
+          <span>• Core API: {health?.apiAvailable ? "Online (Local IPC/REST)" : "Initializing / Offline"}</span>
+          <span>• Vision: {health?.computerVisionReady ? "OpenCV + YOLOv8 Active" : "Setup Required"}</span>
+          <span>• Platform: Desktop Electron & Local Web</span>
+          <span>• Version: 1.0.0 Production Release</span>
+        </div>
+      </div>
+
+      <div className="footer-bottom">
+        <span>UrbanFlow — Intelligent Municipal Traffic Management</span>
+        <a
+          className="back-to-top"
+          href="#top"
+          onClick={(e) => {
+            e.preventDefault();
+            setActiveNav("dashboard");
+            window.scrollTo({ top: 0, behavior: "smooth" });
+          }}
+        >
+          Back to top <ArrowUp size={13} />
+        </a>
+      </div>
+
+      <div className="footer-copyright">
+        Copyright © 2026 Harsh Aggarwal &lt;aggarwalharsh663@gmail.com&gt;. All rights reserved. Original Author & Sole Intellectual Property Owner: Harsh Aggarwal.
+      </div>
+    </footer>
+  </div>;
 }

@@ -67,13 +67,21 @@ try {
 
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
-  log('Another instance is already running. Quitting duplicate instance.');
+  log('Another instance is already running. Quitting duplicate instance immediately.');
   app.quit();
+  process.exit(0);
 } else {
   app.on('second-instance', () => {
-    if (mainWindow) {
+    log('second-instance event received! Bringing mainWindow to front...');
+    if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
+      if (!mainWindow.isVisible()) mainWindow.show();
+      mainWindow.show();
       mainWindow.focus();
+      try {
+        mainWindow.setAlwaysOnTop(true);
+        mainWindow.setAlwaysOnTop(false);
+      } catch (e) {}
     }
   });
 }
@@ -90,8 +98,8 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 }
 
 const candidatePythons = [
-  path.join(BACKEND_DIR, 'python', 'pythonw.exe'),
   path.join(BACKEND_DIR, 'python', 'python.exe'),
+  path.join(BACKEND_DIR, 'python', 'pythonw.exe'),
   path.join(BACKEND_DIR, '.venv', 'Scripts', 'python.exe'),
   path.join(BACKEND_DIR, '.venv', 'python.exe'),
   path.join(BACKEND_DIR, 'python.exe'),
@@ -482,6 +490,7 @@ function startPythonWorker() {
 
   pythonProcess.on('error', (err) => {
     log('Python process spawn error:', err);
+    if (workerReadyResolve) workerReadyResolve();
     if (!isWorkerReady && dialog && typeof dialog.showErrorBox === 'function') {
       try {
         dialog.showErrorBox(
@@ -494,6 +503,7 @@ function startPythonWorker() {
 
   pythonProcess.on('exit', (code, signal) => {
     log(`Python process exited with code ${code}, signal ${signal}`);
+    if (workerReadyResolve) workerReadyResolve();
     for (const [id, { reject }] of pendingRequests.entries()) {
       reject(new Error('Python worker terminated unexpectedly.'));
     }
@@ -1265,7 +1275,7 @@ function cleanupProcesses() {
 
   if (pythonProcess && !pythonProcess.killed) {
     try {
-      pythonProcess.kill('SIGTERM');
+      pythonProcess.kill();
     } catch (e) {}
     pythonProcess = null;
   }
@@ -1277,7 +1287,8 @@ app.whenReady().then(async () => {
   registerProtocolHandler();
   startPythonWorker();
 
-  await workerReadyPromise.catch(() => {});
+  const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 6000));
+  await Promise.race([workerReadyPromise, timeoutPromise]).catch(() => {});
   createWindow();
 
   // Prevent arbitrary webview attachment and enforce strict window opening policy
@@ -1325,6 +1336,10 @@ app.whenReady().then(async () => {
 app.on('before-quit', () => {
   log('before-quit event');
   cleanupProcesses();
+  setTimeout(() => {
+    try { app.exit(0); } catch (e) {}
+    process.exit(0);
+  }, 1000).unref();
 });
 
 app.on('window-all-closed', () => {
@@ -1336,6 +1351,10 @@ app.on('window-all-closed', () => {
   cleanupProcesses();
   if (process.platform !== 'darwin') {
     app.quit();
+    setTimeout(() => {
+      try { app.exit(0); } catch (e) {}
+      process.exit(0);
+    }, 1000).unref();
   }
 });
 
