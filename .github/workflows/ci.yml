@@ -54,8 +54,8 @@ jobs:
           exts = ('.py', '.ts', '.tsx', '.js', '.jsx', '.cs', '.cjs', '.mjs', '.ps1', '.bat')
           missing = []
           for root, dirs, files in os.walk('.'):
-              norm = os.path.normpath(root)
-              if any(x in norm for x in ['node_modules', '.git', 'backend/python', 'backend\\\\python', 'dist', 'build', '.cache', '.output']):
+              norm = root.replace(os.sep, '/')
+              if any(x in norm for x in ['node_modules', '.git', 'backend/python', 'dist', 'build', '.cache', '.output']):
                   continue
               for f in files:
                   if f.endswith(exts):

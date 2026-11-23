@@ -78,22 +78,59 @@ namespace UrbanFlowLauncher
             catch { }
         }
 
-        private static void ActivateExistingInstance()
+        private static bool ActivateExistingInstance(string baseDir = null)
         {
             try
             {
-                Process current = Process.GetCurrentProcess();
-                foreach (Process proc in Process.GetProcessesByName("Urban Flow"))
+                // 1. Search for any visible top-level window belonging to Urban Flow
+                foreach (Process proc in Process.GetProcesses())
                 {
-                    if (proc.Id != current.Id && proc.MainWindowHandle != IntPtr.Zero)
+                    try
                     {
-                        ShowWindowAsync(proc.MainWindowHandle, SW_RESTORE);
-                        SetForegroundWindow(proc.MainWindowHandle);
-                        return;
+                        if (proc.MainWindowHandle != IntPtr.Zero)
+                        {
+                            string title = proc.MainWindowTitle;
+                            if (!string.IsNullOrEmpty(title) &&
+                                (title.IndexOf("Urban Flow", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                 title.IndexOf("UrbanFlow", StringComparison.OrdinalIgnoreCase) >= 0))
+                            {
+                                ShowWindowAsync(proc.MainWindowHandle, SW_RESTORE);
+                                SetForegroundWindow(proc.MainWindowHandle);
+                                return true;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+
+                // 2. Search for any running electron process originating from baseDir
+                if (!string.IsNullOrEmpty(baseDir) && Directory.Exists(baseDir))
+                {
+                    string fullBaseDir = Path.GetFullPath(baseDir).TrimEnd('\\');
+                    foreach (Process proc in Process.GetProcessesByName("electron"))
+                    {
+                        try
+                        {
+                            if (proc.MainModule != null)
+                            {
+                                string modPath = Path.GetFullPath(proc.MainModule.FileName);
+                                if (modPath.StartsWith(fullBaseDir, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    if (proc.MainWindowHandle != IntPtr.Zero)
+                                    {
+                                        ShowWindowAsync(proc.MainWindowHandle, SW_RESTORE);
+                                        SetForegroundWindow(proc.MainWindowHandle);
+                                    }
+                                    return true;
+                                }
+                            }
+                        }
+                        catch { }
                     }
                 }
             }
             catch { }
+            return false;
         }
 
         public static bool LocateElectron(string baseDir, out string electronExe, out string frontendDir)
@@ -203,20 +240,27 @@ namespace UrbanFlowLauncher
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            // Single-Instance Mutex: prevents duplicate instances and orphaned process cascades
+            string appDir = AppDomain.CurrentDomain.BaseDirectory;
+
+            // Immediately check if an instance of Urban Flow is already running.
+            // If running, restore and focus the existing window and exit without spawning another process.
+            if (ActivateExistingInstance(appDir))
+            {
+                return;
+            }
+
+            // Single-Instance Mutex: prevents rapid duplicate launches in quick succession
             bool createdNew;
             using (Mutex mutex = new Mutex(true, MutexName, out createdNew))
             {
                 if (!createdNew)
                 {
-                    ActivateExistingInstance();
+                    ActivateExistingInstance(appDir);
                     return;
                 }
 
                 try
                 {
-                    string appDir = AppDomain.CurrentDomain.BaseDirectory;
-
                     // Unblock launcher executable itself if extracted from a web download archive
                     try
                     {

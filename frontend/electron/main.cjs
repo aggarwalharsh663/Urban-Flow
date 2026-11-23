@@ -55,6 +55,8 @@ let isQuitting = false;
 
 app.name = 'Urban Flow';
 try {
+  const userDataPath = path.join(app.getPath('appData'), 'Urban Flow');
+  app.setPath('userData', userDataPath);
   app.setAppUserModelId('Urban Flow');
   app.setAboutPanelOptions({
     applicationName: 'Urban Flow',
@@ -68,7 +70,7 @@ try {
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   log('Another instance is already running. Quitting duplicate instance immediately.');
-  app.quit();
+  try { app.exit(0); } catch (e) {}
   process.exit(0);
 } else {
   app.on('second-instance', () => {
@@ -82,6 +84,10 @@ if (!gotTheLock) {
         mainWindow.setAlwaysOnTop(true);
         mainWindow.setAlwaysOnTop(false);
       } catch (e) {}
+    } else if (splashWindow && !splashWindow.isDestroyed()) {
+      if (splashWindow.isMinimized()) splashWindow.restore();
+      splashWindow.show();
+      splashWindow.focus();
     }
   });
 }
