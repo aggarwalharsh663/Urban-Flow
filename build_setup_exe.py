@@ -62,13 +62,41 @@ def is_excluded(rel_str: str) -> bool:
         return True
     return False
 
+def sign_binaries_in_dir(target_dir: Path):
+    """Ensure all critical Windows executables in target_dir are Authenticode signed."""
+    if not target_dir.is_dir():
+        return
+    sign_script = f"""
+    $cert = Get-ChildItem Cert:\\CurrentUser\\My | Where-Object {{ $_.Subject -like '*Harsh Aggarwal*' }} | Select-Object -First 1
+    if (-not $cert) {{
+        $cert = Get-ChildItem Cert:\\CurrentUser\\My | Where-Object {{ $_.Subject -like '*Urban Flow*' }} | Select-Object -First 1
+    }}
+    if ($cert) {{
+        $targets = @(
+            '{target_dir}\\backend\\python\\python.exe',
+            '{target_dir}\\backend\\python\\pythonw.exe',
+            '{target_dir}\\Urban Flow.exe',
+            '{target_dir}\\updater.exe'
+        )
+        foreach ($t in $targets) {{
+            if (Test-Path $t) {{
+                Set-AuthenticodeSignature -FilePath $t -Certificate $cert | Out-Null
+                Unblock-File -Path $t -ErrorAction SilentlyContinue
+            }}
+        }}
+    }}
+    """
+    subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", sign_script], capture_output=True, text=True)
+
 def main():
     payload_zip = WORK_DIR / "urban_flow_payload.zip"
     has_source_override = any(arg.startswith("--source=") for arg in sys.argv[1:])
     rebuild_zip = "--rebuild-zip" in sys.argv or has_source_override or not payload_zip.exists() or payload_zip.stat().st_size < 100 * 1024 * 1024
 
     if rebuild_zip:
-        print("=== [1/3] Building Complete Urban Flow payload ZIP ===")
+        print("=== [1/3] Signing binaries and building Complete Urban Flow payload ZIP ===")
+        sign_binaries_in_dir(SOURCE_DIR)
+        sign_binaries_in_dir(WORK_DIR)
         if payload_zip.exists():
             payload_zip.unlink()
 

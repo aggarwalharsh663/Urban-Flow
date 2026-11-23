@@ -411,20 +411,38 @@ function createErrorResponse(message, status = 400, extraHeaders = {}) {
 function startPythonWorker() {
   log('Spawning portless Python worker:', PYTHON_EXE, WORKER_SCRIPT);
 
-  pythonProcess = spawn(
-    PYTHON_EXE,
-    [WORKER_SCRIPT],
-    {
-      cwd: BACKEND_DIR,
-      windowsHide: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: Object.assign({}, process.env, {
-        PYTHONPATH: BACKEND_DIR,
-        PYTHONUNBUFFERED: '1',
-        URBAN_FLOW_IPC_TOKEN: IPC_SESSION_TOKEN,
-      }),
+  try {
+    pythonProcess = spawn(
+      PYTHON_EXE,
+      [WORKER_SCRIPT],
+      {
+        cwd: BACKEND_DIR,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: Object.assign({}, process.env, {
+          PYTHONPATH: BACKEND_DIR,
+          PYTHONUNBUFFERED: '1',
+          URBAN_FLOW_IPC_TOKEN: IPC_SESSION_TOKEN,
+        }),
+      }
+    );
+  } catch (err) {
+    log('Fatal: synchronous exception during Python worker spawn:', err);
+    if (dialog && typeof dialog.showErrorBox === 'function') {
+      try {
+        dialog.showErrorBox(
+          'Urban Flow - Engine Startup Error',
+          `Failed to launch backend engine (${PYTHON_EXE}).\n\nError: ${err.message}\n\nPlease verify that Windows Security or Smart App Control is not blocking Python binaries.`
+        );
+      } catch (e) {}
     }
-  );
+    return;
+  }
+
+  if (!pythonProcess || !pythonProcess.stdout) {
+    log('Fatal: Python worker spawn did not return a valid process.');
+    return;
+  }
 
   const rl = readline.createInterface({
     input: pythonProcess.stdout,
@@ -464,6 +482,14 @@ function startPythonWorker() {
 
   pythonProcess.on('error', (err) => {
     log('Python process spawn error:', err);
+    if (!isWorkerReady && dialog && typeof dialog.showErrorBox === 'function') {
+      try {
+        dialog.showErrorBox(
+          'Urban Flow - Engine Startup Error',
+          `Failed to initialize backend engine (${PYTHON_EXE}).\n\nError: ${err.message}\n\nPlease check Windows Security / Smart App Control settings.`
+        );
+      } catch (e) {}
+    }
   });
 
   pythonProcess.on('exit', (code, signal) => {

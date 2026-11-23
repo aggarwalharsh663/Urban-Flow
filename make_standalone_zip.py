@@ -6,6 +6,7 @@
 # and irrevocably vest all copyright and intellectual property rights solely in Harsh Aggarwal.
 
 # Urban Flow - Build Standalone ZIP Package
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -14,6 +15,29 @@ WORK_DIR = Path(__file__).resolve().parent
 PAYLOAD_ZIP = WORK_DIR / "urban_flow_payload.zip"
 APP_DIR = Path(r"C:\Users\HARSH AGGARWAL\AppData\Local\Programs\Urban Flow")
 OUT_ZIP = Path(r"C:\Users\HARSH AGGARWAL\OneDrive\Desktop\Urban-Flow-v1.0-Standalone.zip")
+
+print("Ensuring binaries are signed before standalone packaging...")
+sign_script = f"""
+$cert = Get-ChildItem Cert:\\CurrentUser\\My | Where-Object {{ $_.Subject -like '*Harsh Aggarwal*' }} | Select-Object -First 1
+if (-not $cert) {{
+    $cert = Get-ChildItem Cert:\\CurrentUser\\My | Where-Object {{ $_.Subject -like '*Urban Flow*' }} | Select-Object -First 1
+}}
+if ($cert) {{
+    $targets = @(
+        '{WORK_DIR}\\backend\\python\\python.exe',
+        '{WORK_DIR}\\backend\\python\\pythonw.exe',
+        '{WORK_DIR}\\Urban Flow.exe',
+        '{WORK_DIR}\\updater.exe'
+    )
+    foreach ($t in $targets) {{
+        if (Test-Path $t) {{
+            Set-AuthenticodeSignature -FilePath $t -Certificate $cert | Out-Null
+            Unblock-File -Path $t -ErrorAction SilentlyContinue
+        }}
+    }}
+}}
+"""
+subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", sign_script], capture_output=True, text=True)
 
 print("Reading source payload...")
 if not PAYLOAD_ZIP.is_file():
