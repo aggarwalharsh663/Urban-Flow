@@ -83,7 +83,8 @@ namespace UrbanFlowLauncher
             try
             {
                 // 1. Search for any visible top-level window belonging to Urban Flow
-                foreach (Process proc in Process.GetProcesses())
+                Process[] procs = Process.GetProcesses();
+                foreach (Process proc in procs)
                 {
                     try
                     {
@@ -101,13 +102,18 @@ namespace UrbanFlowLauncher
                         }
                     }
                     catch { }
+                    finally
+                    {
+                        try { proc.Dispose(); } catch { }
+                    }
                 }
 
                 // 2. Search for any running electron process originating from baseDir
                 if (!string.IsNullOrEmpty(baseDir) && Directory.Exists(baseDir))
                 {
                     string fullBaseDir = Path.GetFullPath(baseDir).TrimEnd('\\');
-                    foreach (Process proc in Process.GetProcessesByName("electron"))
+                    Process[] electronProcs = Process.GetProcessesByName("electron");
+                    foreach (Process proc in electronProcs)
                     {
                         try
                         {
@@ -126,6 +132,10 @@ namespace UrbanFlowLauncher
                             }
                         }
                         catch { }
+                        finally
+                        {
+                            try { proc.Dispose(); } catch { }
+                        }
                     }
                 }
             }
