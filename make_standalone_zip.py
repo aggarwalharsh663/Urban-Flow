@@ -16,23 +16,30 @@ PAYLOAD_ZIP = WORK_DIR / "urban_flow_payload.zip"
 APP_DIR = Path(r"C:\Users\HARSH AGGARWAL\AppData\Local\Programs\Urban Flow")
 OUT_ZIP = Path(r"C:\Users\HARSH AGGARWAL\OneDrive\Desktop\Urban-Flow-v1.0-Standalone.zip")
 
-print("Ensuring binaries are signed before standalone packaging...")
+print("Ensuring binaries are unblocked before standalone packaging...")
 sign_script = f"""
-$cert = Get-ChildItem Cert:\\CurrentUser\\My | Where-Object {{ $_.Subject -like '*Harsh Aggarwal*' }} | Select-Object -First 1
-if (-not $cert) {{
-    $cert = Get-ChildItem Cert:\\CurrentUser\\My | Where-Object {{ $_.Subject -like '*Urban Flow*' }} | Select-Object -First 1
+$targets = @(
+    '{WORK_DIR}\\backend\\python\\python.exe',
+    '{WORK_DIR}\\backend\\python\\pythonw.exe',
+    '{WORK_DIR}\\Urban Flow.exe',
+    '{WORK_DIR}\\updater.exe'
+)
+foreach ($t in $targets) {{
+    if (Test-Path $t) {{
+        Unblock-File -Path $t -ErrorAction SilentlyContinue
+    }}
 }}
+$cert = Get-ChildItem Cert:\\CurrentUser\\My | Where-Object {{
+    $_.HasPrivateKey -and ($_.Issuer -ne $_.Subject) -and $_.Verify()
+}} | Select-Object -First 1
 if ($cert) {{
-    $targets = @(
-        '{WORK_DIR}\\backend\\python\\python.exe',
-        '{WORK_DIR}\\backend\\python\\pythonw.exe',
+    $customTargets = @(
         '{WORK_DIR}\\Urban Flow.exe',
         '{WORK_DIR}\\updater.exe'
     )
-    foreach ($t in $targets) {{
+    foreach ($t in $customTargets) {{
         if (Test-Path $t) {{
             Set-AuthenticodeSignature -FilePath $t -Certificate $cert | Out-Null
-            Unblock-File -Path $t -ErrorAction SilentlyContinue
         }}
     }}
 }}
