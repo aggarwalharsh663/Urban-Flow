@@ -831,11 +831,11 @@ namespace UrbanFlowSetup
 
         private static void CreateShortcuts(string targetDir)
         {
+            string iconPath = Path.Combine(targetDir, "frontend", "public", "favicon.ico");
             try
             {
                 string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
                 string shortcutPath = Path.Combine(desktopPath, "Urban Flow.lnk");
-                string iconPath = Path.Combine(targetDir, "frontend", "public", "favicon.ico");
 
                 string electronExe, frontendDir;
                 if (!LocateElectron(targetDir, out electronExe, out frontendDir))
@@ -844,11 +844,23 @@ namespace UrbanFlowSetup
                     electronExe = Path.Combine(frontendDir, "node_modules", "electron", "dist", "electron.exe");
                 }
 
+                string vbsPath = Path.Combine(targetDir, "Urban Flow.vbs");
+                string wscriptExe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "wscript.exe");
+
                 IShellLinkW link = (IShellLinkW)new ShellLink();
                 link.SetDescription("Urban Flow - Adaptive Traffic Signal System");
-                link.SetPath(electronExe);
-                link.SetArguments("\"" + frontendDir + "\"");
-                link.SetWorkingDirectory(frontendDir);
+                if (File.Exists(electronExe))
+                {
+                    link.SetPath(electronExe);
+                    link.SetArguments("\"" + frontendDir + "\"");
+                    link.SetWorkingDirectory(frontendDir);
+                }
+                else if (File.Exists(vbsPath) && File.Exists(wscriptExe))
+                {
+                    link.SetPath(wscriptExe);
+                    link.SetArguments("\"" + vbsPath + "\"");
+                    link.SetWorkingDirectory(targetDir);
+                }
                 if (File.Exists(iconPath))
                 {
                     link.SetIconLocation(iconPath, 0);
@@ -871,17 +883,17 @@ namespace UrbanFlowSetup
                     // Fallback to PowerShell WScript.Shell shortcut creation if COM interop fails
                     string desktopPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
                     string shortcutPath = Path.Combine(desktopPath, "Urban Flow.lnk");
-                    string electronExe, frontendDir;
-                    if (!LocateElectron(targetDir, out electronExe, out frontendDir))
-                    {
-                        frontendDir = Path.Combine(targetDir, "frontend");
-                        electronExe = Path.Combine(frontendDir, "node_modules", "electron", "dist", "electron.exe");
-                    }
+                    string vbsPath = Path.Combine(targetDir, "Urban Flow.vbs");
+                    string wscriptExe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "wscript.exe");
+                    string target = File.Exists(vbsPath) && File.Exists(wscriptExe) ? wscriptExe : Path.Combine(targetDir, "Run Urban Flow.bat");
+                    string args = File.Exists(vbsPath) && File.Exists(wscriptExe) ? ("\"" + vbsPath + "\"") : "";
                     string psScript = string.Format(
-                        "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('{0}'); $s.TargetPath = '{1}'; $s.Arguments = '\"{2}\"'; $s.WorkingDirectory = '{2}'; $s.Save()",
+                        "$ws = New-Object -ComObject WScript.Shell; $s = $ws.CreateShortcut('{0}'); $s.TargetPath = '{1}'; $s.Arguments = '{2}'; $s.WorkingDirectory = '{3}'; if (Test-Path '{4}') {{ $s.IconLocation = '{4}' }}; $s.Save()",
                         shortcutPath.Replace("'", "''"),
-                        electronExe.Replace("'", "''"),
-                        frontendDir.Replace("'", "''")
+                        target.Replace("'", "''"),
+                        args.Replace("'", "''"),
+                        targetDir.Replace("'", "''"),
+                        iconPath.Replace("'", "''")
                     );
                     string encodedCommand = Convert.ToBase64String(Encoding.Unicode.GetBytes(psScript));
                     ProcessStartInfo psi = new ProcessStartInfo("powershell", "-NoProfile -NonInteractive -EncodedCommand " + encodedCommand);
@@ -898,11 +910,20 @@ namespace UrbanFlowSetup
         {
             try
             {
+                string vbs = Path.Combine(targetDir, "Urban Flow.vbs");
+                if (File.Exists(vbs))
+                {
+                    string wscript = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "wscript.exe");
+                    ProcessStartInfo psi = new ProcessStartInfo(wscript, "\"" + vbs + "\"");
+                    psi.WorkingDirectory = targetDir;
+                    psi.UseShellExecute = true;
+                    Process.Start(psi);
+                    return;
+                }
+
                 if (!LaunchElectron(targetDir))
                 {
-                    string msg = "Urban Flow installation completed, but the Electron runtime was not found at:\n" +
-                        Path.Combine(targetDir, "frontend", "node_modules", "electron", "dist", "electron.exe") +
-                        "\n\nPlease verify your installation directory or run setup again.";
+                    string msg = "Urban Flow installation completed, but the application runtime was not found.";
                     if (!silent)
                     {
                         MessageBox.Show(

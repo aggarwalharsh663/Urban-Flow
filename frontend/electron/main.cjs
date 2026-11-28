@@ -88,6 +88,9 @@ if (!gotTheLock) {
       if (splashWindow.isMinimized()) splashWindow.restore();
       splashWindow.show();
       splashWindow.focus();
+    } else {
+      log('second-instance: no active window found, re-creating mainWindow...');
+      createWindow();
     }
   });
 }
